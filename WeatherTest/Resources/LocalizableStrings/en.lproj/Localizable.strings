@@ -1,0 +1,47 @@
+/* 
+  Localizable.strings
+  WeatherTest
+
+  Created by user on 1/20/21.
+  
+*/
+
+"Enter the name of the city" = "Enter the name of the city";
+"City"                       = "City";
+"Show weather"               = "Show weather";
+"Warning"                    = "Warning";
+"Please check grammar"       = "Please check grammar";
+"Got it!"                    = "Got it!";
+"Temperature"                = "Temperature";
+"Feels like"                 = "Feels like";
+"Description"                = "Description";
+"Weather"                    = "Weather";
+"Invalid name"               = "Invalid name";
+"Show history"               = "Show history";
+"History"                    = "History";
+"Update"                     = "Update";
+"Date"                       = "Date";
+"Time"                       = "Time";
+"Settings"                   = "Settings";
+"Fahrenheit"                 = "Fahrenheit";
+"Celsius"                    = "Celsius";
+"Kelvin"                     = "Kelvin";
+"Wind Speed"                 = "Wind Speed";
+"Speed"                      = "Speed";
+"mph"                        = "mph";
+"km/h"                       = "km/h";
+"m/s"                        = "m/s";
+"Charts"                     = "Charts";
+"Dark mode"                  = "Dark mode";
+"Sun from"                   = "Sun from";
+"to"                         = "to";
+"Next sunrise at"            = "Next sunrise at";
+"Loading"                    = "Loading";
+"All"                        = "All";
+"Today"                      = "Today";
+"On this week"               = "On this week";
+"Show current weather "      = "Show current weather ";
+"in your city"               = "in your city";
+"Allow Weather to access your location while you are using the app?" = "Allow Weather to access your location while you are using the app?";
+"Allow"                      = "Allow";
+"Don't Allow"                = "Don't Allow";

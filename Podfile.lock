@@ -1,20 +1,30 @@
 PODS:
   - Alamofire (5.4.1)
+  - Charts (3.6.0):
+    - Charts/Core (= 3.6.0)
+  - Charts/Core (3.6.0)
   - SkyFloatingLabelTextField (3.8.0)
+  - SwiftLint (0.42.0)
 
 DEPENDENCIES:
-  - Alamofire (~> 5.2)
-  - SkyFloatingLabelTextField (~> 3.0)
+  - Alamofire (= 5.4.1)
+  - Charts
+  - SkyFloatingLabelTextField (= 3.8.0)
+  - SwiftLint (= 0.42.0)
 
 SPEC REPOS:
   trunk:
     - Alamofire
+    - Charts
     - SkyFloatingLabelTextField
+    - SwiftLint
 
 SPEC CHECKSUMS:
   Alamofire: 2291f7d21ca607c491dd17642e5d40fdcda0e65c
+  Charts: b1e3a1f5a1c9ba5394438ca3b91bd8c9076310af
   SkyFloatingLabelTextField: 5a338412114808e961fe2d14ea2c5452c8b6e4aa
+  SwiftLint: 4fa9579c63416865179bc416f0a92d55f009600d
 
-PODFILE CHECKSUM: ac028e2549f3f94152e35e0e3477027bc252fd79
+PODFILE CHECKSUM: 4f86f82e158be1c0646f7757d9b2ec7b3c54654f
 
 COCOAPODS: 1.10.0

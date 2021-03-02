@@ -7,7 +7,9 @@ target 'WeatherTest' do
 
   # Pods for WeatherTest
 
-  pod 'Alamofire', '~> 5.2'
-  pod 'SkyFloatingLabelTextField', '~> 3.0'
+  pod 'Alamofire', '5.4.1'
+  pod 'SkyFloatingLabelTextField', '3.8.0'
+  pod 'SwiftLint', '0.42.0'
+  pod 'Charts', '3.6.0'
 
 end
