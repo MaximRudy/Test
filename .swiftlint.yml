@@ -1,0 +1,68 @@
+excluded:
+    - TestTaskTurkcellUITests
+    - TestTaskTurkcellTests
+    - Carthage
+    - Pods
+
+disabled_rules:
+    - force_cast
+    - discouraged_direct_init
+    - identifier_name
+    - trailing_newline
+    - trailing_whitespace
+    - multiple_closures_with_trailing_closure
+    
+line_length: 180
+
+file_length:
+    warning: 200
+
+custom_rules:
+    final_class:
+        included: ".*.swift"
+        name: "Final class requrement"
+        regex: '^class'
+        message: "All classes must be final or nonfinal"
+        saverity: error
+
+    open_iboutlets:
+        included: ".*.swift"
+        name: "IBOutlet opening"
+        regex: '@IBOutlet ?(weak){0,1} var'
+        message: "IBOutlet should be private"
+        severity: error
+
+    open_ibaction:
+        included: ".*.swift"
+        name: "IBAction opening"
+        regex: '@IBAction func'
+        message: "IBAction should be private"
+        severity: error
+
+    already_true:
+        regex: "== true"
+        message: "Don't compare to true, just use the bool value."
+
+    already_bool:
+        regex: "== false"
+        message: "Don't compare to false, just use !value."
+
+    multiline_commented_code:
+        regex: '^\s*[a-z]'
+        match_kinds: comment
+        message: "Comment starting with lowercase letter - did you forget to delete old code?"
+
+#    print_using:
+#        regex: 'print'
+#        message: "Print decrease performance of the app"
+
+    class_protocol:
+        regex: ': class'
+        message: "Use Anyobject instead"
+
+    image_name_initialization:
+        included: ".*.swift"
+        name: "Image initialization without R.swift"
+        regex: 'UIImage\(named:[^)]+\)'
+        message: "Use R.image.name() or typealias of this instead"
+        severity: error

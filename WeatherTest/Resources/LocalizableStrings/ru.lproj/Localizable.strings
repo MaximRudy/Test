@@ -1,0 +1,47 @@
+/* 
+  Localizable.strings
+  WeatherTest
+
+  Created by user on 1/20/21.
+  
+*/
+
+"Enter the name of the city" = "Введите название города";
+"City"                       = "Город";
+"Show weather"               = "Показать погоду";
+"Warning"                    = "Ошибка";
+"Please check grammar"       = "Проверьте введённый город";
+"Got it!"                    = "Хорошо";
+"Temperature"                = "Температура";
+"Feels like"                 = "Ощущается как";
+"Description"                = "Описание";
+"Weather"                    = "Погода";
+"Invalid name"               = "Неверное название";
+"Show history"               = "Показать историю";
+"History"                    = "История";
+"Update"                     = "Обновить данные";
+"Date"                       = "Дата";
+"Time"                       = "Время";
+"Settings"                   = "Настройки";
+"Fahrenheit"                 = "Фаренгейт";
+"Celsius"                    = "Цельсия";
+"Kelvin"                     = "Кельвин";
+"Wind Speed"                 = "Скорость ветра";
+"Speed"                      = "Скорость";
+"mph"                        = "миль/час";
+"km/h"                       = "км/ч";
+"m/s"                        = "м/с";
+"Charts"                     = "Графики";
+"Dark mode"                  = "Темная тема";
+"Sun from"                   = "Солнце с";
+"to"                         = "до";
+"Next sunrise at"            = "Следующий рассвет в";
+"Loading"                    = "Загрузка";
+"All"                        = "Вся";
+"Today"                      = "Сегодня";
+"On this week"               = "На этой неделе";
+"Show current weather "      = "Показать текущую погоду ";
+"in your city"               = "в вашем городе";
+"Allow Weather to access your location while you are using the app?" = "Разрешить Weather получать доступ к вашему местоположению, пока вы используете приложение?";
+"Allow"                      = "Разрешить";
+"Don't Allow"                = "Не разрешать";
