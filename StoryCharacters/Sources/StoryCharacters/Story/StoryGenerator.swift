@@ -6,11 +6,11 @@ import Foundation
 public struct StoryPrompt: Sendable, Equatable {
     /// Name of the hero of the tale (empty = a default hero for the language).
     public var heroName: String
-    /// Where the tale happens, e.g. "волшебный лес" / "a quiet forest" (empty = default).
+    /// Where the tale happens, as a noun phrase: "волшебный лес" / "an enchanted forest" (empty = default).
     public var setting: String
-    /// A single noun the moral is about, e.g. "дружба" / "friendship" (empty = default).
+    /// What the moral is about, as a noun phrase: "дружба" / "friendship" / "a dream" (empty = default).
     public var theme: String
-    /// "ru" or "en" (anything else falls back to English templates).
+    /// "ru" or "en" (any "ru-…" code selects Russian, everything else English templates).
     public var languageCode: String
     /// The character that will narrate the result.
     public var narrator: CharacterKind
@@ -34,19 +34,35 @@ public protocol StoryGenerating: Sendable {
 
 // MARK: - TemplateStoryGenerator
 
-/// Offline generator: assembles a 10–12 sentence bedtime tale from Russian or English templates,
+/// Offline generator: assembles an 8-sentence bedtime tale (within the contract's 6–8) from Russian or English templates,
 /// substituting the hero, the setting and the theme, with varied emotion/gesture tags and a gentle moral.
-/// Deterministic: the same prompt always yields the same story, so previews and tests are stable.
+///
+/// The seed is derived from the prompt plus a `variation`. `makeStory` is deterministic (same prompt and
+/// variation → same story), so previews and tests are stable. `generateStory` on a generator created with
+/// the default `variation` of 0 picks a fresh random variation for every call, so pressing "Generate"
+/// again with the same prompt tells a different tale; pass a non-zero `variation` to make it repeatable.
 public struct TemplateStoryGenerator: StoryGenerating {
-    public init() {}
+    /// Extra seed mixed into the prompt hash. 0 = a random variation per `generateStory` call.
+    public var variation: UInt64
+
+    public init(variation: UInt64 = 0) {
+        self.variation = variation
+    }
 
     public func generateStory(_ prompt: StoryPrompt) async throws -> Story {
         try Task.checkCancellation()
-        return makeStory(prompt)
+        let chosen = variation != 0 ? variation : UInt64.random(in: 1...UInt64.max)
+        return makeStory(prompt, variation: chosen)
     }
 
-    /// Synchronous variant for previews and tests.
+    /// Synchronous, deterministic variant for previews and tests (uses the generator's `variation`).
     public func makeStory(_ prompt: StoryPrompt) -> Story {
+        makeStory(prompt, variation: variation)
+    }
+
+    /// Synchronous, deterministic: the same prompt and variation always yield the same story
+    /// (variation 0 is the prompt's canonical tale).
+    public func makeStory(_ prompt: StoryPrompt, variation: UInt64) -> Story {
         let isRussian = StoryLibrary.baseLanguage(prompt.languageCode) == "ru"
         let pack = isRussian ? StoryTemplates.russian : StoryTemplates.english
         let languageCode = isRussian ? "ru" : "en"
@@ -56,18 +72,22 @@ public struct TemplateStoryGenerator: StoryGenerating {
         let theme = StoryTemplates.sanitize(prompt.theme, fallback: pack.defaultTheme, limit: 40)
         let narratorName = isRussian ? prompt.narrator.russianName : prompt.narrator.englishName
 
-        let seed = StoryTemplates.fnv1a("\(hero)|\(setting)|\(theme)|\(languageCode)|\(prompt.narrator.rawValue)")
+        var seed = StoryTemplates.fnv1a("\(hero)|\(setting)|\(theme)|\(languageCode)|\(prompt.narrator.rawValue)")
+        if variation != 0 {
+            // Mix with an odd multiplier so neighbouring variations land on unrelated seeds.
+            seed ^= variation &* 0x9E37_79B9_7F4A_7C15
+        }
         var rng = StorySeededGenerator(seed: seed)
 
+        // opening + trait + 2-sentence encounter + idea + resolution + moral + goodnight
+        // = 8 sentences (CONTRACT §4.6: 6–8), at least 4 gestures.
         var lines: [String] = []
-        lines.reserveCapacity(12)
+        lines.reserveCapacity(8)
         lines.append(rng.pick(pack.openings))
         lines.append(rng.pick(pack.traits))
         lines.append(contentsOf: rng.pick(pack.encounters))
-        if rng.chance(0.7) { lines.append(rng.pick(pack.worries)) }
         lines.append(rng.pick(pack.ideas))
         lines.append(rng.pick(pack.resolutions))
-        if rng.chance(0.7) { lines.append(rng.pick(pack.windDowns)) }
         lines.append(rng.pick(pack.morals))
         lines.append(rng.pick(pack.goodnights))
 
@@ -110,19 +130,24 @@ struct StorySeededGenerator: RandomNumberGenerator {
         let index = Int(next() % UInt64(array.count))
         return array[index]
     }
-
-    /// True with probability `probability` (0…1).
-    mutating func chance(_ probability: Double) -> Bool {
-        let unit = Double(next() >> 11) / Double(UInt64(1) << 53)
-        return unit < probability
-    }
 }
 
 // MARK: - StoryTemplates
 
-/// Template text for the offline generator. Placeholders: `{hero}`, `{Hero}` (capitalized),
-/// `{setting}`, `{theme}`, `{Theme}` (title case), `{narrator}`.
-/// Every template is exactly one sentence (one terminator at the end) so the parser yields one segment per line.
+/// Template text for the offline generator.
+///
+/// Placeholders: `{hero}`, `{Hero}` (first letter capitalized), `{setting}`, `{Setting}` (first letter
+/// capitalized), `{theme}`, `{Theme}` (title case, small words lowercase), `{narrator}`.
+///
+/// Rules that keep every substitution grammatical:
+/// * every template is exactly one sentence (one terminator group at the end), so the parser yields one
+///   segment per line; user input is stripped of terminators and brackets by `sanitize`;
+/// * Russian templates use the present tense (verbs then do not depend on the hero's gender), use the hero
+///   only in the nominative case, and use the setting only as a quoted name («{Setting}»), so any
+///   noun phrase in the nominative ("снежные горы", "лунная поляна") fits;
+/// * English templates use the setting as a standalone noun phrase ("an enchanted forest", "the starry sky")
+///   and the theme as one too ("friendship", "a dream").
+/// Every encounter arc carries two gestures and every idea and goodnight one, so a story has ≥ 4 gestures.
 enum StoryTemplates {
     struct Fields {
         var hero: String
@@ -139,82 +164,73 @@ enum StoryTemplates {
         var summaryTemplate: String
         var openings: [String]
         var traits: [String]
-        /// Four-sentence mini arcs: incident, reaction, problem, promise to help.
+        /// Two-sentence mini arcs: the incident with the newcomer's trouble, then the promise to help.
         var encounters: [[String]]
-        var worries: [String]
         var ideas: [String]
         var resolutions: [String]
-        var windDowns: [String]
         var morals: [String]
         var goodnights: [String]
     }
 
-    // Russian templates use the present tense so they read naturally for a hero of any gender.
     static let russian = Pack(
         defaultHero: "Звёздочка",
         defaultSetting: "Сонный лес",
         defaultTheme: "дружба",
-        titleTemplate: "{Hero} и {theme}",
-        summaryTemplate: "Спокойная сказка на ночь о том, как {hero} узнаёт, что такое {theme}.",
+        titleTemplate: "{Hero} и тайна слова «{theme}»",
+        summaryTemplate: "Спокойная сказка на ночь: {hero} помогает новому другу и узнаёт, что значит {theme}.",
         openings: [
-            "[happy][gesture:wave] Далеко-далеко, в краю под названием «{setting}», живёт {hero}.",
-            "[neutral] Есть на свете тихое и удивительное место — «{setting}», и именно там живёт {hero}.",
-            "[happy] Каждый вечер, когда зажигаются первые звёзды, в краю «{setting}» готовится ко сну {hero}.",
+            "[happy][gesture:wave] Далеко-далеко, в краю под названием «{Setting}», живёт {hero}.",
+            "[neutral] Есть на свете тихое и удивительное место — край «{Setting}», и именно там живёт {hero}.",
+            "[happy][gesture:bounce] Каждый вечер, когда зажигаются первые звёзды, в краю «{Setting}» готовится ко сну {hero}.",
+            "[listening] Послушай, мой друг: в краю «{Setting}», где даже ветер говорит шёпотом, живёт {hero}.",
         ],
         traits: [
             "[curious] Больше всего на свете {hero} любит смотреть на звёзды и думать о том, что же такое {theme}.",
             "[thinking][gesture:think] Один вопрос никак не даёт покоя: что же на самом деле значит слово «{theme}»?",
             "[listening] {Hero} умеет слушать ветер и тихие шаги ночи, но слово «{theme}» пока остаётся загадкой.",
+            "[shy][gesture:shy] {Hero} немного стесняется, но очень хочет узнать, что же такое {theme}.",
         ],
         encounters: [
             [
-                "[surprised][gesture:surprisePop] Однажды вечером с неба тихо спускается маленький светлячок и садится прямо на ладошку.",
-                "[listening] Светлячок шепчет, что заблудился и очень скучает по своей полянке.",
-                "[sad] Его огонёк становится совсем слабым, а дорога домой никому не известна.",
-                "[curious][gesture:nod] {Hero} кивает и обещает помочь, чего бы это ни стоило.",
+                "[surprised][gesture:surprisePop] Однажды вечером с неба спускается маленький светлячок и тихо шепчет, что заблудился, а его огонёк становится всё слабее.",
+                "[curious][gesture:nod] {Hero} кивает и обещает помочь ему найти родную полянку, чего бы это ни стоило.",
             ],
             [
-                "[curious][gesture:peek] Однажды в кустах что-то тихонько шуршит, и {hero} осторожно заглядывает туда.",
-                "[surprised] Там сидит крошечный ёжик с мокрыми от росы иголками и дрожит.",
-                "[sad] Ёжик потерял свою тропинку и боится, что никогда не найдёт дорогу к дому.",
+                "[curious][gesture:peek] Однажды в кустах что-то тихонько шуршит, а там дрожит крошечный ёжик, который потерял свою тропинку и боится, что не найдёт дорогу домой.",
                 "[happy][gesture:nod] {Hero} садится рядом и тихо говорит, что вместе они обязательно всё придумают.",
             ],
             [
-                "[surprised] Однажды утром прямо на крыльцо опускается маленькое пушистое облачко.",
-                "[curious] Облачко вздыхает: оно отстало от своей облачной семьи и теперь не знает, куда плыть.",
-                "[scared] Без семьи облачку страшно и одиноко, и оно начинает тихонько накрапывать дождиком.",
+                "[sad][gesture:shake] Однажды утром на крыльцо опускается маленькое пушистое облачко: оно отстало от своей облачной семьи и от грусти накрапывает тихим дождиком.",
                 "[listening][gesture:nod] {Hero} слушает очень внимательно и решает, что никого нельзя оставлять в беде.",
             ],
-        ],
-        worries: [
-            "[thinking] Сначала {hero} совсем не знает, с чего начать.",
-            "[sad] Ночь кажется очень большой, а помощь — очень маленькой.",
-            "[thinking][gesture:think] Задача непростая, и {hero} долго-долго думает.",
+            [
+                "[scared][gesture:surprisePop] Однажды ночью в траву с тихим звоном падает маленькая звёздочка, и её лучики дрожат, ведь она не может забраться обратно на небо.",
+                "[happy][gesture:wave] {Hero} машет ей и ласково говорит: «Не бойся, я помогу тебе вернуться домой».",
+            ],
         ],
         ideas: [
             "[excited][gesture:bounce] И вдруг {hero} вспоминает: звёзды видят всё сверху и наверняка знают дорогу!",
             "[happy][gesture:celebrate] И тут приходит идея — позвать на помощь всех друзей, ведь вместе любая дорога короче!",
-            "[excited] Вдруг {hero} замечает, что тёплый свет доброго сердца освещает тропинку лучше любого фонарика!",
+            "[excited][gesture:wakeUp] Вдруг {hero} замечает, что тёплый свет доброго сердца освещает тропинку лучше любого фонарика!",
+            "[curious][gesture:think] И тут {hero} придумывает: можно спеть тихую песенку, и эхо подскажет верный путь!",
         ],
         resolutions: [
             "[happy][gesture:celebrate] Шаг за шагом, огонёк за огоньком, новый друг возвращается домой, а все вокруг радуются.",
             "[love] Дома нового друга давно ждут, и все вокруг говорят спасибо за доброе сердце.",
             "[laughing][gesture:giggle] Новый друг так радуется, что хихикает, и {hero} хихикает вместе с ним.",
-        ],
-        windDowns: [
-            "[sleepy] Небо над краем «{setting}» становится мягким и тёмно-синим, как самое уютное одеяло.",
-            "[sleepy][gesture:yawn] Становится поздно, глаза слипаются, и даже звёзды зевают.",
-            "[neutral] Ветер стихает, травы шепчут колыбельную, и весь мир готовится ко сну.",
+            "[love][gesture:wink] Наконец новый друг оказывается дома и на прощание весело подмигивает.",
         ],
         morals: [
-            "[pause:0.8][love] Теперь {hero} знает: {theme} — это то, что становится больше, когда делишься.",
-            "[pause:0.8][happy][gesture:nod] Вот что такое {theme}: маленькое доброе дело, сделанное от всего сердца.",
-            "[pause:0.8][love] Главное в этой сказке — {theme}, и это живёт в каждом добром сердце.",
+            "[pause:0.8][love] Теперь {hero} знает: {theme} живёт в каждом сердце и просыпается, когда кому-то нужна помощь.",
+            "[pause:0.8][happy][gesture:nod] Вот так и бывает: {theme} начинается с маленького доброго шага.",
+            "[pause:0.8][love] Запомни, малыш: {theme} делает мир светлее, а сердце — теплее.",
+            "[pause:0.8][thinking][gesture:nod] Эта сказка напоминает: {theme} — самое настоящее волшебство, и оно доступно каждому.",
         ],
         goodnights: [
             "[sleepy][gesture:sleep] Спокойной ночи, {hero}, и спокойной ночи тебе, мой маленький слушатель.",
             "[love][gesture:wave] {narrator} желает тебе самых добрых снов, а {hero} уже тихонько сопит.",
-            "[sleepy] Тише, тише, сказка кончилась — пора закрывать глазки и видеть добрые сны.",
+            "[sleepy][gesture:yawn] Тише, тише, сказка кончилась — пора закрывать глазки и видеть добрые сны.",
+            "[love][gesture:sleep] Сладких снов, дружок, и пусть тебе приснится чудесный край «{Setting}».",
         ]
     )
 
@@ -222,67 +238,61 @@ enum StoryTemplates {
         defaultHero: "Twinkle",
         defaultSetting: "the Sleepy Forest",
         defaultTheme: "friendship",
-        titleTemplate: "{Hero} and {Theme}",
-        summaryTemplate: "A calm bedtime tale in which {hero} discovers what {theme} really means.",
+        titleTemplate: "{Hero} and the Secret of {Theme}",
+        summaryTemplate: "A calm bedtime tale in which {hero} helps a new friend and discovers what {theme} really means.",
         openings: [
-            "[happy][gesture:wave] Far, far away, in a place called {setting}, there lived {hero}.",
-            "[neutral] There is a quiet and wonderful place called {setting}, and that is where {hero} lives.",
-            "[happy] Every evening, when the first stars came out, {hero} got ready for bed in a place called {setting}.",
+            "[happy][gesture:wave] Once upon a time, far beyond the hills and the rivers, there was {setting}, and that is where {hero} lived.",
+            "[neutral] There once was a quiet and wonderful place, {setting}, and a little dreamer called {hero} lived there.",
+            "[happy][gesture:bounce] Every evening, when the first stars began to twinkle, {hero} skipped home through {setting}.",
+            "[listening] Listen closely, little friend, because this is the story of {hero} and a place called home: {setting}.",
         ],
         traits: [
-            "[curious] More than anything, {hero} loved to look at the stars and wonder what {theme} really means.",
-            "[thinking][gesture:think] One question never left {hero} alone: what does the word {theme} truly mean?",
-            "[listening] {Hero} could listen to the wind and the soft footsteps of the night, but the word {theme} was still a mystery.",
+            "[curious] More than anything, {hero} loved to look at the stars and wonder what {theme} really meant.",
+            "[thinking][gesture:think] One question never left {hero} alone: what does {theme} truly mean?",
+            "[listening] {Hero} could hear the wind and the soft footsteps of the night, but {theme} was still a mystery.",
+            "[shy][gesture:shy] {Hero} was a little shy, but longed to find out what {theme} was all about.",
         ],
         encounters: [
             [
-                "[surprised][gesture:surprisePop] One evening a tiny firefly drifted down from the sky and landed right on the hand of {hero}.",
-                "[listening] The firefly whispered that it was lost and missed its little meadow very much.",
-                "[sad] Its light grew dim, and nobody knew the way back home.",
-                "[curious][gesture:nod] {Hero} nodded and promised to help, no matter what.",
+                "[surprised][gesture:surprisePop] One evening a tiny firefly drifted down from the sky and whispered that it was lost, and its little light was growing dim.",
+                "[curious][gesture:nod] {Hero} nodded and promised to help it find its meadow, no matter what.",
             ],
             [
-                "[curious][gesture:peek] One day something rustled softly in the bushes, and {hero} peeked inside.",
-                "[surprised] There sat a tiny hedgehog, its prickles wet with dew, shivering.",
-                "[sad] The hedgehog had lost its path and was afraid it would never find its way home.",
+                "[curious][gesture:peek] One day something rustled in the bushes, and there sat a tiny hedgehog, shivering, because it had lost its path and could not find its way home.",
                 "[happy][gesture:nod] {Hero} sat down beside it and said gently that together they would figure it out.",
             ],
             [
-                "[surprised] One morning a small fluffy cloud floated down and settled on the doorstep.",
-                "[curious] The cloud sighed: it had drifted away from its cloud family and did not know where to go.",
-                "[scared] Without its family the little cloud felt scared and lonely, and it began to sprinkle tiny raindrops.",
+                "[sad][gesture:shake] One morning a small fluffy cloud floated down to the doorstep, sprinkling sad little raindrops, because it had drifted away from its cloud family.",
                 "[listening][gesture:nod] {Hero} listened very carefully and decided that no one should ever be left alone.",
             ],
-        ],
-        worries: [
-            "[thinking] At first {hero} did not know where to begin.",
-            "[sad] The night seemed very big, and the help seemed very small.",
-            "[thinking][gesture:think] It was not an easy task, and {hero} thought for a long, long time.",
+            [
+                "[scared][gesture:surprisePop] One night a little star fell into the grass with a soft jingle, and its rays were trembling, because it could not climb back up into the sky.",
+                "[happy][gesture:wave] {Hero} waved hello and said gently, “Do not be afraid, I will help you get home.”",
+            ],
         ],
         ideas: [
             "[excited][gesture:bounce] Then {hero} remembered: the stars see everything from above and surely know the way!",
-            "[happy][gesture:celebrate] Then an idea came along — call all the friends, because every road is shorter together!",
-            "[excited] Suddenly {hero} noticed that the warm light of a kind heart lit the path better than any lantern!",
+            "[happy][gesture:celebrate] Then an idea came along: call all the friends, because every road is shorter together!",
+            "[excited][gesture:wakeUp] Suddenly {hero} noticed that the warm light of a kind heart lit the path better than any lantern!",
+            "[curious][gesture:think] Then {hero} had a thought: a quiet little song would echo through the dark and show the way!",
         ],
         resolutions: [
             "[happy][gesture:celebrate] Step by step, light by light, the new friend made it home, and everyone cheered.",
-            "[love] At home the new friend had been missed for so long, and everyone said thank you for such a kind heart.",
+            "[love] At home the new friend had been missed so much, and everyone said thank you for such a kind heart.",
             "[laughing][gesture:giggle] The new friend was so happy that it giggled, and {hero} giggled too.",
-        ],
-        windDowns: [
-            "[sleepy] The sky above {setting} turned soft and deep blue, like the cosiest blanket.",
-            "[sleepy][gesture:yawn] It was getting late, eyes were getting heavy, and even the stars were yawning.",
-            "[neutral] The wind grew quiet, the grass hummed a lullaby, and the whole world got ready for sleep.",
+            "[love][gesture:wink] At last the new friend was safe at home and gave a cheerful little wink goodbye.",
         ],
         morals: [
-            "[pause:0.8][love] Now {hero} knows: {theme} is something that grows bigger when you share it.",
-            "[pause:0.8][happy][gesture:nod] That is what {theme} means: a small kind deed, done with all your heart.",
-            "[pause:0.8][love] The heart of this tale is {theme}, and it lives in every kind heart.",
+            "[pause:0.8][love] Now {hero} knows that {theme} lives in every heart and wakes up whenever someone needs help.",
+            "[pause:0.8][happy][gesture:nod] And that is how it goes: {theme} always begins with one small, kind step.",
+            "[pause:0.8][love] Remember, little one: {theme} makes the world brighter and every heart a little warmer.",
+            "[pause:0.8][thinking][gesture:nod] This tale reminds us that {theme} is real magic, and everyone can have it.",
         ],
         goodnights: [
             "[sleepy][gesture:sleep] Good night, {hero}, and good night to you, my little listener.",
             "[love][gesture:wave] {narrator} wishes you the sweetest dreams, and {hero} is already softly snoring.",
-            "[sleepy] Hush now, the tale is over — time to close your eyes and dream kind dreams.",
+            "[sleepy][gesture:yawn] Hush now, the tale is over, so close your eyes and dream kind dreams.",
+            "[love][gesture:sleep] Sweet dreams, little friend, and may you dream of {setting} tonight.",
         ]
     )
 
@@ -292,6 +302,7 @@ enum StoryTemplates {
         var text = template
         text = text.replacingOccurrences(of: "{Hero}", with: capitalizingFirst(fields.hero))
         text = text.replacingOccurrences(of: "{hero}", with: fields.hero)
+        text = text.replacingOccurrences(of: "{Setting}", with: capitalizingFirst(fields.setting))
         text = text.replacingOccurrences(of: "{setting}", with: fields.setting)
         text = text.replacingOccurrences(of: "{Theme}", with: titleCased(fields.theme))
         text = text.replacingOccurrences(of: "{theme}", with: fields.theme)
@@ -322,8 +333,16 @@ enum StoryTemplates {
         return String(first).uppercased() + String(text.dropFirst())
     }
 
+    /// Words that stay lowercase inside an English title ("the Secret of a Dream").
+    private static let titleSmallWords: Set<String> = ["a", "an", "the", "of", "and", "in", "on", "at", "to", "for", "with"]
+
+    /// Title case for a fragment placed in the middle of a title: small words stay lowercase.
     static func titleCased(_ text: String) -> String {
-        text.split(separator: " ").map { capitalizingFirst(String($0)) }.joined(separator: " ")
+        text.split(separator: " ").map { word -> String in
+            let piece = String(word)
+            let lowered = piece.lowercased()
+            return StoryTemplates.titleSmallWords.contains(lowered) ? lowered : StoryTemplates.capitalizingFirst(piece)
+        }.joined(separator: " ")
     }
 
     /// FNV-1a 64-bit over UTF-8 — stable across processes (unlike `hashValue`).

@@ -38,7 +38,7 @@ struct RendererControl: View {
             }
         }
         .padding(12)
-        .glassPanel()
+        .contentPanel()
         .animation(.snappy, value: showsQuality)
     }
 }
@@ -84,7 +84,7 @@ struct EmotionGrid: View {
             }
         }
         .padding(12)
-        .glassPanel()
+        .contentPanel()
     }
 }
 
@@ -98,12 +98,13 @@ struct EmotionButton: View {
             VStack(spacing: 4) {
                 Image(systemName: emotion.symbolName)
                     .font(.title3)
-                    .frame(height: 24)
+                    .frame(minHeight: 24)
                 Text(emotion.displayName(languageCode: L10n.languageCode))
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .font(.system(.caption2, design: .rounded, weight: .medium))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
+            .dynamicTypeSize(...DynamicTypeSize.accessibility2)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
             .padding(.horizontal, 4)
@@ -162,7 +163,7 @@ struct GestureBar: View {
             .scrollIndicators(.hidden)
         }
         .padding(12)
-        .glassPanel()
+        .contentPanel()
     }
 
     /// SF Symbol for each gesture (the package does not define one).
@@ -211,5 +212,6 @@ struct GestureChip: View {
         .buttonStyle(.plain)
         .foregroundStyle(isActive ? AppTheme.accent : Color.white)
         .accessibilityLabel(gesture.displayName(languageCode: L10n.languageCode))
+        .accessibilityAddTraits(isActive ? .isSelected : [])
     }
 }

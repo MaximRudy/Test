@@ -8,6 +8,10 @@ import simd
 ///
 /// Observable properties change rarely (emotion, speaking flag, active gesture). Every per-frame
 /// field is `@ObservationIgnored` so `pose(at:)` never invalidates SwiftUI views.
+///
+/// Clock: `pose(at:)` takes `CACurrentMediaTime()` seconds, but the simulation runs on a rig-local clock that
+/// starts at 0, advances by the clamped `dt` (so it excludes pauses) and restarts on `reset()`. The clock is kept in
+/// `Double`; `CharacterPose.time` is that local time as `Float`, which keeps time-keyed shader phases precise.
 @MainActor @Observable public final class CharacterRig {
     public let design: CharacterDesign
     public var configuration: RigConfiguration
@@ -35,7 +39,8 @@ import simd
     @ObservationIgnored private var speech = SpeechAnimator()
     @ObservationIgnored private var lastTime: TimeInterval = 0
     @ObservationIgnored private var hasTime = false
-    @ObservationIgnored private var localTime: Float = 0
+    /// Rig-local simulation time (seconds). Double, so long sessions never stall or drift.
+    @ObservationIgnored private var localTime: TimeInterval = 0
     @ObservationIgnored private var externalLipSync: LipSyncSource? = nil
     @ObservationIgnored private var speechDriver: SpeechSynthesisDriver? = nil
     @ObservationIgnored private var pokeBurst: Float = 0
@@ -45,15 +50,32 @@ import simd
     @ObservationIgnored private var ignoringDriver = false
     @ObservationIgnored private var pokeCounter: Int = 0
     @ObservationIgnored private var autoSleeping = false
+    @ObservationIgnored private var emotionBeforeAutoSleep: Emotion = .neutral
+    @ObservationIgnored private var intensityBeforeAutoSleep: Float = 1
+    // Jelly follow-through (`.jelly` designs): an under-damped spring excited by the body's vertical acceleration.
+    @ObservationIgnored private var jiggle = ScalarSpring(value: 0, stiffness: RigTuning.jiggleStiffness,
+                                                          damping: RigTuning.jiggleDamping)
+    @ObservationIgnored private var lastMotionY: Float = 0
+    @ObservationIgnored private var lastMotionVelocity: Float = 0
+    /// 0 = no motion sample yet, 1 = position known, 2 = position and velocity known.
+    @ObservationIgnored private var motionSamples = 0
     /// Test hook: disables autonomous blinking so smoothness tests see only springs and idle motion.
     @ObservationIgnored var isBlinkingEnabled = true
 
     // MARK: Init
 
-    public init(design: CharacterDesign, configuration: RigConfiguration = RigConfiguration()) {
+    /// Every rig gets its own random schedules, so two rigs of the same character never blink in unison.
+    public convenience init(design: CharacterDesign, configuration: RigConfiguration = RigConfiguration()) {
+        self.init(design: design, configuration: configuration, seed: UInt64.random(in: UInt64.min ... UInt64.max))
+    }
+
+    /// Deterministic variant (tests): blink, gaze and micro-expression schedules derive only from the
+    /// character kind and `instanceSeed`.
+    init(design: CharacterDesign, configuration: RigConfiguration, seed instanceSeed: UInt64) {
         self.design = design
         self.configuration = configuration
-        let seed = design.kind.rawValue.utf8.reduce(UInt64(17)) { ($0 &* 31) &+ UInt64($1) }
+        let kindSeed = design.kind.rawValue.utf8.reduce(UInt64(17)) { ($0 &* 31) &+ UInt64($1) }
+        let seed = kindSeed ^ instanceSeed
         blink = BlinkController(seed: seed &+ 1)
         gaze = GazeController(seed: seed &+ 2)
         idle = IdleMotion(seed: seed &+ 3)
@@ -71,7 +93,7 @@ import simd
     // MARK: Emotions
 
     public func set(emotion: Emotion, intensity: Float = 1) {
-        noteInteraction()
+        noteInteraction(restoreEmotion: false, playWakeUp: emotion != .sleepy)
         applyEmotion(emotion, intensity: RigCurves.clamp(intensity, 0, 1))
     }
 
@@ -116,15 +138,18 @@ import simd
     // MARK: Gestures
 
     public func play(_ gesture: Gesture) {
-        noteInteraction()
-        let clip = GestureClip(gesture: gesture, energy: profile.energy)
-        gestures.play(clip, at: localTime)
-        if activeGesture != gesture { activeGesture = gesture }
+        noteInteraction(playWakeUp: false)
+        startGesture(gesture, energy: profile.energy)
     }
 
     public func cancelGesture() {
-        gestures.cancel(at: localTime)
+        gestures.cancel(at: clockTime)
         if activeGesture != nil { activeGesture = nil }
+    }
+
+    private func startGesture(_ gesture: Gesture, energy: Float) {
+        gestures.play(GestureClip(gesture: gesture, energy: energy), at: clockTime)
+        if activeGesture != gesture { activeGesture = gesture }
     }
 
     // MARK: Speech
@@ -140,9 +165,9 @@ import simd
 
     /// Speaks with the built-in `SpeechSynthesisDriver` using the design's `VoiceStyle` and the current emotion's `Prosody`.
     public func speak(_ text: String, language: String? = nil) {
-        noteInteraction()
+        noteInteraction(playWakeUp: false)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let code = resolveLanguage(language, for: text)
+        let code = CharacterRig.resolveLanguage(language, text: text, configured: configuration.speechLanguage)
         let driver = makeDriverIfNeeded()
         speechPending = true
         ignoringDriver = false
@@ -157,10 +182,42 @@ import simd
         if externalLipSync == nil && isSpeaking { isSpeaking = false }
     }
 
-    private func resolveLanguage(_ explicit: String?, for text: String) -> String {
-        if let e = explicit, !e.isEmpty { return CharacterRig.expandLanguageCode(e) }
-        if let c = configuration.speechLanguage, !c.isEmpty { return CharacterRig.expandLanguageCode(c) }
-        return CharacterRig.expandLanguageCode(TextVisemeEstimator.detectLanguage(of: text))
+    /// Language for `speak(_:)`: the explicit code → the language detected from the text's letters (Cyrillic → "ru",
+    /// Latin → "en"; a configured code with the same base language refines the region, e.g. "en-GB") →
+    /// `RigConfiguration.speechLanguage` → the system language → "en". Expanded with `expandLanguageCode`.
+    static func resolveLanguage(_ explicit: String?, text: String, configured: String?) -> String {
+        if let e = explicit, !e.isEmpty { return expandLanguageCode(e) }
+        let config: String? = (configured?.isEmpty == false) ? configured : nil
+        if let detected = detectedLanguage(of: text) {
+            if let c = config, baseLanguage(of: c) == detected { return expandLanguageCode(c) }
+            return expandLanguageCode(detected)
+        }
+        if let c = config { return expandLanguageCode(c) }
+        if let system = Locale.current.language.languageCode?.identifier, !system.isEmpty {
+            return expandLanguageCode(system)
+        }
+        return expandLanguageCode("en")
+    }
+
+    /// "ru" when the text contains a Cyrillic letter, "en" when it contains a Latin letter, nil otherwise
+    /// (digits, punctuation, emoji, other scripts).
+    static func detectedLanguage(of text: String) -> String? {
+        var sawLatin = false
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            if v >= 0x0400 && v <= 0x052F { return "ru" }
+            if !sawLatin && v < 0x0250 && scalar.properties.isAlphabetic { sawLatin = true }
+        }
+        return sawLatin ? "en" : nil
+    }
+
+    /// Lower-cased language part of a BCP-47 / POSIX code ("en-GB" → "en", "ru_RU" → "ru").
+    static func baseLanguage(of code: String) -> String {
+        let lower = code.lowercased()
+        if let separator = lower.firstIndex(where: { $0 == "-" || $0 == "_" }) {
+            return String(lower[..<separator])
+        }
+        return lower
     }
 
     /// "ru" → "ru-RU", "en" → "en-US"; full BCP-47 codes pass through.
@@ -201,7 +258,11 @@ import simd
 
     /// Tap reaction chosen by personality (surprisePop / giggle / shy / wink) plus a sparkle burst.
     public func poke() {
-        noteInteraction()
+        if noteInteraction() {
+            // A character that dozed off on its own wakes up: the wake-up stretch is the reaction.
+            pokeBurst = 1
+            return
+        }
         let personality = design.personality
         pokeCounter += 1
         let gesture: Gesture
@@ -231,31 +292,50 @@ import simd
         if lookTarget != nil { lookTarget = nil }
     }
 
-    private func noteInteraction() {
-        idle.noteInteraction(at: localTime)
+    /// Rig-local time as `Float` for the controllers.
+    private var clockTime: Float { Float(localTime) }
+
+    /// Refreshes the inactivity timer and wakes a character that fell asleep on its own: the emotion it had
+    /// before dozing off comes back (unless the caller is about to set one) and a `.wakeUp` gesture plays.
+    /// - Returns: true when this call woke the character up.
+    @discardableResult
+    private func noteInteraction(restoreEmotion: Bool = true, playWakeUp: Bool = true) -> Bool {
+        idle.noteInteraction(at: clockTime)
+        guard autoSleeping else { return false }
         autoSleeping = false
+        if restoreEmotion && currentEmotion == .sleepy {
+            applyEmotion(emotionBeforeAutoSleep, intensity: intensityBeforeAutoSleep)
+        }
+        if playWakeUp {
+            startGesture(.wakeUp, energy: profile.energy)
+        }
+        return true
     }
 
     // MARK: Simulation
 
     /// Advances the simulation to `time` (CACurrentMediaTime seconds) and returns the pose.
-    /// Calling twice with the same time returns the same pose.
+    /// Calling twice with the same time returns the same pose; a non-finite time is ignored (returns the last pose).
     @discardableResult
     public func pose(at time: TimeInterval) -> CharacterPose {
+        guard time.isFinite else { return currentPose }
         if hasTime && time == lastTime { return currentPose }
-        var dt: Float = 0
+        var step: TimeInterval = 0
         if hasTime {
             let raw = time - lastTime
-            if raw > 0 { dt = min(Float(raw), max(0, configuration.maxDeltaTime)) }
+            if raw > 0 { step = min(raw, TimeInterval(max(0, configuration.maxDeltaTime))) }
         }
         hasTime = true
         lastTime = time
-        localTime += dt
-        let now = localTime
+        localTime += step
+        let dt = Float(step)
+        let now = clockTime
 
         // Auto-sleep after a long quiet spell.
         if !autoSleeping && currentEmotion != .sleepy && !isSpeaking
             && idle.shouldAutoSleep(at: now, after: configuration.autoSleepAfter) {
+            emotionBeforeAutoSleep = currentEmotion
+            intensityBeforeAutoSleep = emotionIntensity
             autoSleeping = true
             applyEmotion(.sleepy, intensity: 1)
             gestures.play(GestureClip(gesture: .yawn, energy: 0.1), at: now)
@@ -281,6 +361,8 @@ import simd
         let sample = currentSample(at: time)
         let driverSpeaking = !ignoringDriver && ((speechDriver?.isSpeaking ?? false) || speechPending)
         let speakingNow = externalLipSync != nil ? sample.isSpeaking : driverSpeaking
+        // Talking is activity: it keeps the auto-sleep timer fresh (and wakes a dozing character).
+        if speakingNow { noteInteraction(playWakeUp: false) }
         let restGaze = SIMD2<Float>(profile.face.gazeX, profile.face.gazeY)
         let bias = RigCurves.clamp(profile.cameraBias * (configuration.cameraBias / 0.6), 0, 1)
         let g = gaze.update(time: now, dt: dt, restGaze: restGaze, gazeWander: profile.gazeWander, cameraBias: bias,
@@ -297,7 +379,9 @@ import simd
         }
 
         // 5. Speech (mouth replace + additive head motion).
+        let offsetBeforeSpeech = pose.body.offsetY
         speech.apply(sample: sample, headMotion: configuration.speechHeadMotion, dt: dt, to: &pose)
+        let speechOffsetY = pose.body.offsetY - offsetBeforeSpeech
         if isSpeaking != speakingNow { isSpeaking = speakingNow }
 
         // 6. Gesture delta (additive).
@@ -305,6 +389,11 @@ import simd
         pose += gestureDelta * gestureScale
         let active = gestures.activeGesture
         if activeGesture != active { activeGesture = active }
+
+        // 6b. Jelly follow-through (talking bob excluded so syllables do not make the body jiggle).
+        if design.features.contains(.jelly) {
+            applyJelly(to: &pose, motionY: pose.body.offsetY - speechOffsetY, dt: dt, scale: gestureScale)
+        }
 
         // 7. Poke sparkle burst (0.6 s).
         if pokeBurst > 0 {
@@ -317,6 +406,37 @@ import simd
         pose.time = now
         currentPose = pose
         return pose
+    }
+
+    /// Squash & stretch that lags behind vertical motion: an under-damped spring driven by
+    /// `−0.0025 × acceleration` of the body's height, so hops and landings wobble on after the gesture ends.
+    /// The output is soft-limited (no flat tops) to ±0.08.
+    private func applyJelly(to pose: inout CharacterPose, motionY: Float, dt: Float, scale: Float) {
+        switch motionSamples {
+        case 0:
+            lastMotionY = motionY
+            motionSamples = 1
+        case 1:
+            if dt > 0 {
+                lastMotionVelocity = (motionY - lastMotionY) / dt
+                lastMotionY = motionY
+                motionSamples = 2
+            }
+        default:
+            if dt > 0 {
+                let velocity = (motionY - lastMotionY) / dt
+                let acceleration = (velocity - lastMotionVelocity) / dt
+                lastMotionVelocity = velocity
+                lastMotionY = motionY
+                let target = RigCurves.clamp(-RigTuning.jiggleGain * acceleration,
+                                             -RigTuning.jiggleTargetLimit, RigTuning.jiggleTargetLimit)
+                jiggle.update(target: target, dt: dt)
+            }
+        }
+        let raw = jiggle.value
+        let j = raw / (1 + abs(raw) / RigTuning.jiggleLimit) * scale
+        pose.body.scaleY += j
+        pose.body.scaleX -= 0.6 * j
     }
 
     private func currentSample(at time: TimeInterval) -> LipSyncSample {
@@ -336,6 +456,10 @@ import simd
         speech.reset()
         pokeBurst = 0
         autoSleeping = false
+        jiggle.snap(to: 0)
+        lastMotionY = 0
+        lastMotionVelocity = 0
+        motionSamples = 0
         hasTime = false
         lastTime = 0
         localTime = 0
@@ -365,6 +489,14 @@ private enum RigTuning {
     static let faceStiffness: Float = 140
     static let bodyStiffness: Float = 90
     static let effectsStiffness: Float = 50
+
+    // Jelly follow-through: ≈ 2.6 Hz wobble, damping ratio 0.25 (rings for ~0.7 s).
+    static let jiggleStiffness: Float = 260
+    static let jiggleDamping: Float = 0.5 * Float(260).squareRoot()
+    static let jiggleGain: Float = 0.0025
+    static let jiggleTargetLimit: Float = 0.06
+    /// Asymptote of the smooth output limiter `x / (1 + |x| / limit)`.
+    static let jiggleLimit: Float = 0.08
 
     // face.v: eyeOpenL, eyeOpenR, gazeX, gazeY, pupil, eyeScale, lowerLidL, lowerLidR,
     //         browRaiseL, browRaiseR, browTiltL, browTiltR, blush, headTilt, headTurn, headNod

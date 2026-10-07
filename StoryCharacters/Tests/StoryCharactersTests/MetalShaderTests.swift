@@ -103,12 +103,43 @@ final class MetalShaderTests: XCTestCase {
     func testSparkleFormulaConstantsPresent() {
         // §3.8 is implemented verbatim in sparkleVertex.
         let msl = CharacterShaderSource.msl
-        XCTAssertTrue(msl.contains("fract(sin(i * 12.9898) * 43758.5453)"))
+        // The hash uses precise::sin so GPU seeds match Swift's Float sin (fast-math sin is inexact at ~770 rad).
+        XCTAssertTrue(msl.contains("fract(precise::sin(i * 12.9898) * 43758.5453)"))
         XCTAssertTrue(msl.contains("fract(seed * 7.1 + 0.37)"))
         XCTAssertTrue(msl.contains("2.2 + 1.8 * seed2"))
         XCTAssertTrue(msl.contains("1.10 + 0.60 * fract(seed * 3.3)"))
         XCTAssertTrue(msl.contains("0.05 * (0.6 + fract(seed * 5.5))"))
         XCTAssertTrue(msl.contains("iid >= 40u"))
+        // Burst particles share the ambient position formula (§3.8 changes only rate, rad and lifetime).
+        XCTAssertTrue(msl.contains("float2 pos = float2(cos(ang) * rad, sin(ang) * rad * 0.6 + (t - 0.5) * 0.6);"))
+    }
+
+    func testRobeStarHashMatchesTheCanvasMirror() {
+        // `cellHash` must stay bit-identical to `CharacterPaths.cellHash` (Canvas robe star field).
+        let msl = CharacterShaderSource.msl
+        XCTAssertTrue(msl.contains("uint h = uint(cell.x) * 73856093u;"))
+        XCTAssertTrue(msl.contains("h ^= uint(cell.y) * 19349663u;"))
+        XCTAssertTrue(msl.contains("h ^= salt * 83492791u;"))
+        XCTAssertTrue(msl.contains("h *= 2146121005u;"))
+        XCTAssertTrue(msl.contains("h *= 2221713035u;"))
+        XCTAssertTrue(msl.contains("return float(h & 16777215u) / 16777216.0;"))
+    }
+
+    func testSilhouettesAndLayeringFollowTheCanvasRenderer() {
+        let msl = CharacterShaderSource.msl
+        // Flame = the drop outline plus the §3.5 modulation, swayed like `CharacterPaths.flamePoint`.
+        XCTAssertTrue(msl.contains("float2 u = float2(q.x - 0.22 * sin(wig) * smoothstep(0.1, 1.05, q.y), q.y);"))
+        // Hood curl runs along the same quadratic Bezier as `CharacterPaths.hoodBody` ((0.25, 1.25) is its control point).
+        XCTAssertTrue(msl.contains("2.0 * u * t * float2(0.25, 1.25)"))
+        // Brows are clamped to the FacePose range like the Canvas brows.
+        XCTAssertTrue(msl.contains("float raise = clamp((side < 0.0) ? u.brows.x : u.brows.y, -1.0, 1.0);"))
+        // Dome fireflies are composited under the glass (Canvas order: sparkles, then glass).
+        XCTAssertTrue(msl.contains("m *= fillAA(sdDomeGlass(in.world), aa) * (1.0 - glass.a);"))
+    }
+
+    func testBreathingUsesTheDesignBreathDepth() {
+        // §3.5: renderers scale `breathe` by `idle.breathDepth`; the renderer stores it in the spare `layoutE.w`.
+        XCTAssertTrue(CharacterShaderSource.msl.contains("float breathe = u.bodyParams.y * u.layoutE.w;"))
     }
 
     // MARK: - Helpers

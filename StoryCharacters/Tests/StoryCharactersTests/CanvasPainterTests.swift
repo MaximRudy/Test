@@ -146,6 +146,24 @@ final class CanvasPainterTests: XCTestCase {
         XCTAssertFalse(CharacterPaths.brain(center: CGPoint(x: 0, y: 0.62), radius: 0.3).isEmpty)
     }
 
+    /// The inset brain (rim bands) shrinks every lobe by the inset; the grooves need the brain clip because the
+    /// central fissure starts below the brain's lower edge.
+    func testBrainInsetAndGrooveClip() {
+        let c = CGPoint(x: 0, y: 0.62)
+        let full = CharacterPaths.brain(center: c, radius: 0.3).boundingRect
+        let inset = CharacterPaths.brain(center: c, radius: 0.3, inset: 0.04).boundingRect
+        XCTAssertEqual(inset.minX, full.minX + 0.04, accuracy: 1e-3)
+        XCTAssertEqual(inset.maxX, full.maxX - 0.04, accuracy: 1e-3)
+        XCTAssertEqual(inset.minY, full.minY + 0.04, accuracy: 1e-3)
+        XCTAssertEqual(inset.maxY, full.maxY - 0.04, accuracy: 1e-3)
+        XCTAssertTrue(CharacterPaths.brain(center: c, radius: 0.3, inset: 0.5).isEmpty)
+
+        let brain = CharacterPaths.brain(center: c, radius: 0.3)
+        let fissureStart = CGPoint(x: 0, y: c.y - 0.16)
+        XCTAssertFalse(brain.contains(fissureStart), "fissure starts outside the brain, so it must be clipped")
+        XCTAssertTrue(brain.contains(CGPoint(x: 0, y: c.y)))
+    }
+
     // MARK: - Mouth (§3.3)
 
     func testMouthSamplerIsClosed() {
@@ -299,6 +317,123 @@ final class CanvasPainterTests: XCTestCase {
         XCTAssertEqual(centre.x, centreStatic.x, accuracy: 1e-6, "floaters rotate about their centre")
         XCTAssertGreaterThan(floatScene.body.point(0, 1).x, centreStatic.x + 1)
         XCTAssertFalse(floatScene.bodyPath.isEmpty)
+    }
+
+    // MARK: - Parity details (§3.5, §3.6, §3.8)
+
+    func testFlameHasPointedTipAndPlainLowerHalf() {
+        XCTAssertEqual(CharacterPaths.dropOutlineCount, 48)
+        XCTAssertEqual(CharacterPaths.dropOutlinePoint(0), CGPoint(x: 0, y: 1.05), "index 0 is the drop tip")
+        for w in [CGFloat(0), 1, 2.5, 4] {
+            var maxOtherY = -CGFloat.greatestFiniteMagnitude
+            for i in 0..<CharacterPaths.dropOutlineCount {
+                let p = CharacterPaths.flamePoint(i, wiggle: w, flickerPhase: 1.7, flicker: 0.012)
+                if i > 0 { maxOtherY = max(maxOtherY, p.y) }
+                // Below y = −0.15 the modulation weight is exactly 0: the flame is the plain drop there,
+                // so nothing switches on at the equator.
+                let d = CharacterPaths.dropOutlinePoint(i)
+                if d.y < -0.15 {
+                    XCTAssertEqual(p.x, d.x, accuracy: 1e-9)
+                    XCTAssertEqual(p.y, d.y, accuracy: 1e-9)
+                }
+            }
+            let tip = CharacterPaths.flamePoint(0, wiggle: w, flickerPhase: 1.7, flicker: 0.012)
+            XCTAssertGreaterThan(tip.y, maxOtherY + 0.02, "the tip is a point above every other sample")
+            XCTAssertEqual(tip.y, 1.05, accuracy: 0.11)
+            XCTAssertEqual(tip.x, 0.22 * sin(w), accuracy: 0.02, "the tip sways 0.22·sin(wiggle)")
+        }
+    }
+
+    func testCapEdgeIsShallow() {
+        // Same edge as the MSL: 0.35 − 0.09·(0.5 + 0.5·cos 10x) — never below 0.26, well above Sprout's eyes.
+        XCTAssertEqual(CharacterPaths.capEdgeY(0), 0.26, accuracy: 1e-9)
+        XCTAssertEqual(CharacterPaths.capEdgeY(CGFloat.pi / 10), 0.35, accuracy: 1e-9)
+        let box = CharacterPaths.capMask().boundingRect
+        XCTAssertGreaterThanOrEqual(box.minY, 0.25)
+        XCTAssertLessThanOrEqual(box.minY, 0.27)
+    }
+
+    func testCellHashMatchesTheShaderReferenceValues() {
+        // Reference values of the integer hash shared with the MSL `cellHash` (computed with 32-bit wrapping arithmetic).
+        XCTAssertEqual(CharacterPaths.cellHash(x: 0, y: 0, salt: 1), CGFloat(8984527) / 16777216)
+        XCTAssertEqual(CharacterPaths.cellHash(x: -3, y: 2, salt: 2), CGFloat(16702215) / 16777216)
+        XCTAssertEqual(CharacterPaths.cellHash(x: 4, y: -6, salt: 3), CGFloat(8344647) / 16777216)
+        XCTAssertEqual(CharacterPaths.cellHash(x: -5, y: -6, salt: 1), CGFloat(5307642) / 16777216)
+    }
+
+    func testRobeStarFieldStaysOnTheRobe() {
+        let box = CharacterPaths.robeStarField().boundingRect
+        XCTAssertFalse(box.isEmpty)
+        XCTAssertGreaterThanOrEqual(box.minX, -1.45)
+        XCTAssertLessThanOrEqual(box.maxX, 1.45)
+        XCTAssertGreaterThanOrEqual(box.minY, -1.70)
+        XCTAssertLessThanOrEqual(box.maxY, 1.50)
+        // The collar follows y = −0.55 + 0.05·x² like the MSL robe front.
+        XCTAssertTrue(CharacterPaths.robeFrontMask().contains(CGPoint(x: 0, y: -0.60)))
+        XCTAssertFalse(CharacterPaths.robeFrontMask().contains(CGPoint(x: 0, y: -0.50)))
+        XCTAssertTrue(CharacterPaths.robeFrontMask().contains(CGPoint(x: 1.0, y: -0.55)))
+        XCTAssertFalse(CharacterPaths.robeFrontMask().contains(CGPoint(x: 1.0, y: -0.45)))
+    }
+
+    func testInnerFlameColourFollowsDesign() {
+        let lumie = CharacterCatalog.design(for: .lumie)
+        let lumieRes = CanvasResources(design: lumie)
+        XCTAssertEqual(lumieRes.innerFlame, CharacterColors.color(lumie.palette.highlight, alpha: 0.85),
+                       "dome designs light the inner flame with the highlight colour, not the wooden accent")
+        let ember = CharacterCatalog.design(for: .ember)
+        let emberRes = CanvasResources(design: ember)
+        XCTAssertEqual(emberRes.innerFlame, CharacterColors.color(ember.palette.accent, alpha: 0.85))
+    }
+
+    func testCacheRebuildsForCustomDesignWithSameKind() {
+        CharacterColors.clearCache()
+        let lumi = makeDesign(kind: .lumi, shape: .star, features: [.hood, .floats])
+        let a = CharacterColors.resources(for: lumi)
+        var themed = lumi
+        themed.palette.bodyTop = SIMD4<Float>(hex: 0x66CCFF)
+        let b = CharacterColors.resources(for: themed)
+        XCTAssertFalse(a === b, "a different palette must not reuse the cached colours")
+        XCTAssertTrue(b.matches(themed))
+        XCTAssertTrue(CharacterColors.resources(for: themed) === b)
+        var reshaped = themed
+        reshaped.bodyShape = .round
+        let c = CharacterColors.resources(for: reshaped)
+        XCTAssertFalse(c === b, "a different silhouette must not reuse the cached static body")
+        XCTAssertEqual(c.bodyShape, .round)
+        CharacterColors.clearCache()
+    }
+
+    func testSparkleBinsDrawAtMidpoints() {
+        XCTAssertEqual(SparkleBins.index(alpha: 0.05), 0)
+        XCTAssertEqual(SparkleBins.index(alpha: 0.3), 2)
+        XCTAssertEqual(SparkleBins.index(alpha: 1.0), 7)
+        XCTAssertEqual(SparkleBins.index(alpha: .nan), 0)
+        XCTAssertEqual(SparkleBins.opacity(0), 0.0625, accuracy: 1e-12)
+        for a in stride(from: Float(0.05), through: 1.0, by: 0.01) {
+            let k = SparkleBins.index(alpha: a)
+            XCTAssertLessThanOrEqual(abs(SparkleBins.opacity(k) - Double(a)), 1.0 / 16 + 1e-6)
+        }
+    }
+
+    func testPainterSurvivesNonFinitePose() {
+        var broken = CharacterPose.neutral
+        broken.body.accessory = .nan
+        broken.body.armL = .nan
+        broken.face.eyeOpenL = .infinity
+        XCTAssertFalse(CharacterPainter.isFinite(broken))
+        XCTAssertTrue(CharacterPainter.isFinite(.neutral))
+        let brokenPose = broken
+        for kind in [CharacterKind.lumie, .sprout, .lumi] {
+            let design = CharacterCatalog.design(for: kind)
+            let view = Canvas { context, size in
+                CharacterPainter.draw(pose: brokenPose, design: design, in: &context, size: size, quality: .high)
+            }
+            .frame(width: 120, height: 120)
+            let renderer = ImageRenderer(content: view)
+            renderer.proposedSize = ProposedViewSize(width: 120, height: 120)
+            renderer.scale = 1
+            _ = renderer.cgImage
+        }
     }
 
     // MARK: - Rendering smoke test

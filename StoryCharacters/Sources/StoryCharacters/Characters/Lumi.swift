@@ -8,6 +8,8 @@ extension CharacterCatalog {
     ///
     /// Layout notes: the star's inner radius is only 0.52, so the face is compact and centred — eyes close
     /// together and low, a small mouth just below them, cheeks tucked into the lower star notches.
+    /// The brows sit directly under the upper notches (inner vertices at (±0.306, 0.421)), so they are short,
+    /// thin and low (browY 0.29): even the surprised raise (+0.108) keeps them inside the silhouette.
     /// Idle: hood sway (`wiggle`), book glow breathing (`accessory`), wand sparkles (`accessory2`), gentle float.
     /// Signature (Core): `.thinking` taps the wand to the chin (accessory2 pulses); `.excited` flares the star tips (glow 1.6).
     public static let lumi: CharacterDesign = CharacterDesign(
@@ -19,7 +21,7 @@ extension CharacterCatalog {
                                           tongue: 0xFF7E8A, teeth: 0xFFFFFF, outline: 0x4A2A10),
         face: FaceLayout(eyeOffsetX: 0.30, eyeY: 0.05, eyeRadiusX: 0.17, eyeRadiusY: 0.20,
                          irisRadius: 0.135, pupilRadius: 0.075,
-                         browY: 0.33, browLength: 0.20, browThickness: 0.04,
+                         browY: 0.29, browLength: 0.16, browThickness: 0.035,
                          mouthY: -0.28, mouthWidth: 0.18, mouthHeight: 0.16,
                          cheekX: 0.40, cheekY: -0.14, cheekRadius: 0.10,
                          faceScale: 1, faceOffsetY: 0),
@@ -28,7 +30,7 @@ extension CharacterCatalog {
         idle: IdleStyle(floatAmplitude: 0.03, floatFrequency: 0.5, wobbleAmplitude: 0.02, wobbleFrequency: 0.35,
                         flickerRate: 0, breathDepth: 1),
         personality: Personality(energy: 0.5, shyness: 0.15, curiosity: 0.7, playfulness: 0.5),
-        voice: VoiceStyle(pitch: 1.15, rate: 0.95, preferredVoiceIdentifiers: CharacterCatalog.russianVoiceIdentifiers),
+        voice: VoiceStyle(pitch: 1.15, rate: 0.95),
         glowStrength: 1.1,
         sparkleRate: 0.45,
         tagline: [

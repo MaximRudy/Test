@@ -27,8 +27,7 @@ struct SpeechPanel: View {
                 SpeakingIndicator(isSpeaking: rig.isSpeaking)
             }
 
-            TextField(L10n.speechPlaceholder, text: $text, axis: .vertical)
-                .lineLimit(1...3)
+            TextField(L10n.speechPlaceholder, text: $text)
                 .textFieldStyle(.plain)
                 .focused($isFocused)
                 .submitLabel(.send)
@@ -50,6 +49,7 @@ struct SpeechPanel: View {
                     } label: {
                         Label(L10n.say, systemImage: "play.fill")
                             .font(.system(.headline, design: .rounded))
+                            .foregroundStyle(AppTheme.onAccent)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.glassProminent)
@@ -94,7 +94,7 @@ struct SpeechPanel: View {
             .scrollIndicators(.hidden)
         }
         .padding(12)
-        .glassPanel()
+        .contentPanel()
     }
 
     private var trimmedText: String {

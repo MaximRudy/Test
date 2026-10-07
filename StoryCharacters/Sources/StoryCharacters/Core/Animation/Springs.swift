@@ -5,6 +5,8 @@ import Foundation
 /// Integration is semi-implicit (symplectic) Euler, which is energy-stable for the stiffness range
 /// the rig uses as long as the step stays small. Steps longer than 1/60 s are split into equal
 /// sub-steps so a frame hitch (or the 1/15 s clamp after a pause) never makes the spring explode.
+/// One `update` integrates at most 64 sub-steps (64/60 s); longer intervals are clamped to that, and
+/// non-finite or non-positive intervals are ignored, so no sub-step ever exceeds 1/60 s.
 public struct Spring<V: PoseVector>: Sendable {
     /// Restoring force per unit of displacement (rad²/s²). Higher = faster.
     public var stiffness: Float
@@ -33,11 +35,10 @@ public struct Spring<V: PoseVector>: Sendable {
 
     /// Advances the spring by `dt` seconds towards `target`.
     public mutating func update(target: V, dt: Float) {
-        guard dt > 0 else { return }
         // Sub-step so that no individual step exceeds 1/60 s.
-        let stepCount = Int((dt * 60).rounded(.up))
-        let steps = max(1, min(stepCount, 64))
-        let h = dt / Float(steps)
+        guard let plan = SpringStepping.plan(dt) else { return }
+        let steps = plan.count
+        let h = plan.h
         let kh = stiffness * h
         let ch = damping * h
         var i = 0
@@ -76,10 +77,9 @@ public struct ScalarSpring: Sendable, Equatable {
     }
 
     public mutating func update(target: Float, dt: Float) {
-        guard dt > 0 else { return }
-        let stepCount = Int((dt * 60).rounded(.up))
-        let steps = max(1, min(stepCount, 64))
-        let h = dt / Float(steps)
+        guard let plan = SpringStepping.plan(dt) else { return }
+        let steps = plan.count
+        let h = plan.h
         let kh = stiffness * h
         let ch = damping * h
         var i = 0
@@ -93,5 +93,22 @@ public struct ScalarSpring: Sendable, Equatable {
     public mutating func snap(to target: Float) {
         value = target
         velocity = 0
+    }
+}
+
+/// Sub-stepping shared by `Spring` and `ScalarSpring`.
+private enum SpringStepping {
+    /// Sub-steps per second of simulated time (each sub-step is at most 1/60 s).
+    static let subStepsPerSecond: Float = 60
+    /// Most sub-steps one `update` integrates; longer intervals are clamped to `maxSubSteps / subStepsPerSecond`.
+    static let maxSubSteps: Float = 64
+
+    /// Sub-step count and length for `dt`, or nil when `dt` is not a positive, finite interval
+    /// (an infinite or NaN `dt` would otherwise trap in the `Int` conversion or fill the spring with NaN).
+    static func plan(_ dt: Float) -> (count: Int, h: Float)? {
+        guard dt > 0, dt.isFinite else { return nil }
+        let clampedDt = min(dt, maxSubSteps / subStepsPerSecond)
+        let count = max(1, Int(min(clampedDt * subStepsPerSecond, maxSubSteps).rounded(.up)))
+        return (count: count, h: clampedDt / Float(count))
     }
 }

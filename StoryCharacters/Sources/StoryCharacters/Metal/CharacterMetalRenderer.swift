@@ -7,14 +7,16 @@ import simd
 /// Errors raised while building the per-device GPU objects.
 enum CharacterMetalError: Error {
     case missingFunction(String)
+    case commandQueueUnavailable
 }
 
-/// GPU objects shared by every renderer that draws on the same `MTLDevice`:
+/// GPU objects shared by every renderer that draws on the same `MTLDevice`: one long-lived command queue,
 /// the shader library and the two pipeline states (character over transparent, additive sparkles).
 @MainActor
 final class CharacterMetalResources {
     let device: MTLDevice
     let library: MTLLibrary
+    let commandQueue: MTLCommandQueue
     let characterPipeline: MTLRenderPipelineState
     let sparklePipeline: MTLRenderPipelineState
 
@@ -24,6 +26,11 @@ final class CharacterMetalResources {
     init(device: MTLDevice, library: MTLLibrary) throws {
         self.device = device
         self.library = library
+        guard let queue = device.makeCommandQueue() else {
+            throw CharacterMetalError.commandQueueUnavailable
+        }
+        queue.label = "StoryCharacters.characters"
+        self.commandQueue = queue
         guard let characterVertex = library.makeFunction(name: "characterVertex") else {
             throw CharacterMetalError.missingFunction("characterVertex")
         }
@@ -77,7 +84,8 @@ final class CharacterMetalResources {
 @MainActor
 public final class CharacterMetalRenderer: NSObject, MTKViewDelegate {
     /// The rig being drawn. `pose(at: CACurrentMediaTime())` is called exactly once per frame.
-    public let rig: CharacterRig
+    /// `CharacterMetalView` swaps it in place when it is handed a different rig, so the view keeps its identity.
+    public internal(set) var rig: CharacterRig
 
     /// Pauses the view's display link. The view is also paused while it has no window.
     public var isPaused: Bool = false {
@@ -89,17 +97,16 @@ public final class CharacterMetalRenderer: NSObject, MTKViewDelegate {
 
     private weak var view: MTKView?
     private var resources: CharacterMetalResources?
-    private var commandQueue: MTLCommandQueue?
     private var uniforms: CharacterUniforms
-    /// Shader time is relative to the renderer's creation so `Float` keeps millisecond precision for hours.
-    private let startTime: CFTimeInterval
 
-    /// Library + pipeline states per device, shared by every renderer.
+    /// Command queue, library and pipeline states per device, shared by every renderer.
     private static var resourceCache: [ObjectIdentifier: CharacterMetalResources] = [:]
+
+    /// Devices on which every library source failed: later attaches skip the (expensive) loading chain.
+    private static var failedDevices: Set<ObjectIdentifier> = []
 
     public init(rig: CharacterRig) {
         self.rig = rig
-        self.startTime = CACurrentMediaTime()
         self.uniforms = CharacterUniforms(pose: rig.currentPose,
                                           design: rig.design,
                                           viewportSize: SIMD2<Float>(1, 1),
@@ -120,10 +127,8 @@ public final class CharacterMetalRenderer: NSObject, MTKViewDelegate {
             }
             view.colorPixelFormat = CharacterMetalResources.pixelFormat
             resources = CharacterMetalRenderer.resources(for: device)
-            commandQueue = device.makeCommandQueue()
         } else {
             resources = nil
-            commandQueue = nil
         }
         view.delegate = self
         applyPauseState()
@@ -134,8 +139,8 @@ public final class CharacterMetalRenderer: NSObject, MTKViewDelegate {
         applyPauseState()
     }
 
-    /// `true` once a library and both pipeline states exist for the attached device.
-    public var isReady: Bool { resources != nil && commandQueue != nil }
+    /// `true` once a command queue, a library and both pipeline states exist for the attached device.
+    public var isReady: Bool { resources != nil }
 
     private func applyPauseState() {
         guard let view else { return }
@@ -147,30 +152,48 @@ public final class CharacterMetalRenderer: NSObject, MTKViewDelegate {
         if let cached = resourceCache[key] {
             return cached
         }
-        guard let library = makeLibrary(device: device) else { return nil }
-        guard let built = try? CharacterMetalResources(device: device, library: library) else { return nil }
+        if failedDevices.contains(key) {
+            return nil
+        }
+        guard let built = buildResources(device: device) else {
+            failedDevices.insert(key)
+            return nil
+        }
         resourceCache[key] = built
         return built
     }
 
     /// Library loading chain (CONTRACT §4.4): package bundle → process default library → runtime compile.
-    private static func makeLibrary(device: MTLDevice) -> MTLLibrary? {
-        if let library = try? device.makeDefaultLibrary(bundle: Bundle.module), hasCharacterFunctions(library) {
-            return library
+    /// A source is used only if it has all four entry points and both pipeline states build from it;
+    /// otherwise the next source is tried.
+    private static func buildResources(device: MTLDevice) -> CharacterMetalResources? {
+        if let library = try? device.makeDefaultLibrary(bundle: Bundle.module),
+           let built = makeResources(device: device, library: library) {
+            return built
         }
-        if let library = device.makeDefaultLibrary(), hasCharacterFunctions(library) {
-            return library
+        if let library = device.makeDefaultLibrary(),
+           let built = makeResources(device: device, library: library) {
+            return built
         }
         let options = MTLCompileOptions()
         if let library = try? device.makeLibrary(source: CharacterShaderSource.msl, options: options),
-           hasCharacterFunctions(library) {
-            return library
+           let built = makeResources(device: device, library: library) {
+            return built
         }
         return nil
     }
 
+    private static func makeResources(device: MTLDevice, library: MTLLibrary) -> CharacterMetalResources? {
+        guard hasCharacterFunctions(library) else { return nil }
+        return try? CharacterMetalResources(device: device, library: library)
+    }
+
     private static func hasCharacterFunctions(_ library: MTLLibrary) -> Bool {
-        library.functionNames.contains("characterFragment") && library.functionNames.contains("sparkleVertex")
+        let names = library.functionNames
+        return names.contains("characterVertex")
+            && names.contains("characterFragment")
+            && names.contains("sparkleVertex")
+            && names.contains("sparkleFragment")
     }
 
     // MARK: MTKViewDelegate
@@ -189,20 +212,25 @@ public final class CharacterMetalRenderer: NSObject, MTKViewDelegate {
 
     private func render(in view: MTKView) {
         guard !isPaused, view.window != nil else { return }
-        guard let resources, let queue = commandQueue else { return }
+        guard let resources else { return }
         let size = view.drawableSize
         guard size.width >= 1, size.height >= 1 else { return }
         guard let descriptor = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable else { return }
 
-        let now = CACurrentMediaTime()
-        let pose = rig.pose(at: now)
+        let pose = rig.pose(at: CACurrentMediaTime())
+        // Shader time = the rig's local time (`CharacterPose.time`), the same clock the Canvas renderer
+        // uses, so sparkles and effects stay in phase when switching renderers.
+        let design = rig.design
         uniforms = CharacterUniforms(pose: pose,
-                                     design: rig.design,
+                                     design: design,
                                      viewportSize: SIMD2<Float>(Float(size.width), Float(size.height)),
-                                     time: Float(now - startTime))
+                                     time: pose.time)
+        // §3.5: the renderers own `idle.breathDepth`. `CharacterUniforms` leaves `layoutE.w` spare, so the renderer
+        // stores the depth there and the shader scales `bodyParams.y` (breathe) by it, like the Canvas renderer.
+        uniforms.layoutE.w = design.idle.breathDepth
 
-        guard let commandBuffer = queue.makeCommandBuffer(),
+        guard let commandBuffer = resources.commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
 
         var frameUniforms = uniforms

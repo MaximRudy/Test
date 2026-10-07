@@ -334,23 +334,17 @@ final class LipSyncTests: XCTestCase {
 
     func testAudioLevelDriverRespondsToIngestedBuffer() {
         let driver = AudioLevelDriver()
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024),
-              let channel = buffer.floatChannelData else {
+        // iOS taps deliver ~100 ms buffers: a loud 220 Hz tone.
+        guard let buffer = LipSyncTests.toneBuffer(frequency: 220, sampleRate: 48_000, frames: 4_800, amplitude: 0.5) else {
             XCTFail("could not create a PCM buffer")
             return
         }
-        buffer.frameLength = 1024
-        // A loud 220 Hz tone.
-        for i in 0..<1024 {
-            channel[0][i] = 0.5 * sin(Float(i) * 2 * Float.pi * 220 / 48_000)
-        }
         driver.ingest(buffer)
-        // The analysis is stamped with CACurrentMediaTime, so sample on the same clock.
+        // The blocks are replayed on the CACurrentMediaTime clock from the moment the buffer arrived.
         let now = CACurrentMediaTime()
         var s = driver.sample(at: now)
         var t = now
-        for _ in 0..<12 {
+        for _ in 0..<3 {
             t += 1.0 / 60.0
             s = driver.sample(at: t)
         }
@@ -358,5 +352,250 @@ final class LipSyncTests: XCTestCase {
         XCTAssertGreaterThan(s.energy, 0.1)
         XCTAssertTrue(s.isSpeaking)
         XCTAssertEqual(s.mouth.smile, 0)
+
+        // No further buffers: once the queued 100 ms have played the input is silence and the mouth closes.
+        while t < now + 1.0 {
+            t += 1.0 / 60.0
+            s = driver.sample(at: t)
+        }
+        XCTAssertLessThan(s.mouth.open, 0.01)
+        XCTAssertLessThan(s.energy, 0.01)
+        XCTAssertFalse(s.isSpeaking)
+    }
+
+    func testAudioLevelDriverBrightnessDoesNotDependOnSampleRate() {
+        var widths: [Float] = []
+        var rounds: [Float] = []
+        for rate in [16_000.0, 48_000.0] {
+            let driver = AudioLevelDriver()
+            guard let buffer = LipSyncTests.toneBuffer(frequency: 1_000, sampleRate: rate, frames: Int(rate * 0.1), amplitude: 0.5) else {
+                XCTFail("could not create a PCM buffer")
+                return
+            }
+            driver.ingest(buffer)
+            let s = driver.sample(at: CACurrentMediaTime())
+            widths.append(s.mouth.width)
+            rounds.append(s.mouth.round)
+        }
+        XCTAssertEqual(widths[0], widths[1], accuracy: 0.1, "the same sound must give the same vowel colour at any sample rate")
+        XCTAssertEqual(rounds[0], rounds[1], accuracy: 0.1)
+    }
+
+    func testSpectralCentroidIsMeasuredInHertz() {
+        let analyzer = SpectralCentroidAnalyzer()
+        for rate in [16_000.0, 44_100.0, 48_000.0] {
+            guard let buffer = LipSyncTests.toneBuffer(frequency: 1_000, sampleRate: rate, frames: 2_048, amplitude: 0.5),
+                  let channels = buffer.floatChannelData else {
+                XCTFail("could not create a PCM buffer")
+                return
+            }
+            let centroid = analyzer.centroid(of: channels, channelCount: 1, stride: buffer.stride, endFrame: 2_048, sampleRate: rate)
+            XCTAssertEqual(centroid, 1_000, accuracy: 120, "1 kHz tone at \(rate) Hz")
+        }
+        guard let silence = LipSyncTests.toneBuffer(frequency: 1_000, sampleRate: 48_000, frames: 1_024, amplitude: 0),
+              let silentChannels = silence.floatChannelData else {
+            XCTFail("could not create a PCM buffer")
+            return
+        }
+        XCTAssertEqual(analyzer.centroid(of: silentChannels, channelCount: 1, stride: silence.stride, endFrame: 1_024, sampleRate: 48_000), 0)
+        // Back vowels (dark) → 0, front vowels and fricatives (bright) → 1.
+        XCTAssertEqual(AudioLevelTuning.brightness(forCentroid: 300), 0)
+        XCTAssertEqual(AudioLevelTuning.brightness(forCentroid: 4_000), 1)
+        XCTAssertLessThan(AudioLevelTuning.brightness(forCentroid: 770), 0.15)
+        XCTAssertGreaterThan(AudioLevelTuning.brightness(forCentroid: 1_500), 0.8)
+    }
+
+    func testAudioBlockRingReplaysBlocksOnTheClock() {
+        var ring = AudioBlockRing()
+        var levels = SIMD64<Float>(repeating: 0)
+        let centroids = SIMD64<Float>(repeating: 1_000)
+        for i in 0..<10 { levels[i] = Float(i + 1) * 0.01 }
+        ring.enqueue(levels: levels, centroids: centroids, count: 10, blockDuration: 0.01, bufferDuration: 0.1, now: 5.0)
+        XCTAssertFalse(ring.lookup(at: 4.99, tolerance: 0.03).isFresh, "nothing before the first block")
+        XCTAssertEqual(ring.lookup(at: 5.0, tolerance: 0.03).level, 0.01, accuracy: 1e-6)
+        XCTAssertEqual(ring.lookup(at: 5.055, tolerance: 0.03).level, 0.06, accuracy: 1e-6)
+        XCTAssertEqual(ring.lookup(at: 5.055, tolerance: 0.03).centroid, 1_000)
+        XCTAssertTrue(ring.lookup(at: 5.12, tolerance: 0.03).isFresh)
+        XCTAssertFalse(ring.lookup(at: 5.14, tolerance: 0.03).isFresh, "stale 30 ms after the queued audio ends")
+
+        // A buffer that arrives on time continues seamlessly after the previous one.
+        ring.enqueue(levels: levels, centroids: centroids, count: 10, blockDuration: 0.01, bufferDuration: 0.1, now: 5.098)
+        XCTAssertEqual(ring.end, 5.2, accuracy: 1e-6)
+        XCTAssertEqual(ring.lookup(at: 5.105, tolerance: 0.03).level, 0.01, accuracy: 1e-6)
+        XCTAssertEqual(ring.lookup(at: 5.095, tolerance: 0.03).level, 0.10, accuracy: 1e-6)
+
+        // Capacity is bounded; a feed faster than real time resynchronises to `now`.
+        for k in 0..<20 {
+            ring.enqueue(levels: levels, centroids: centroids, count: 10, blockDuration: 0.01, bufferDuration: 0.1, now: 5.2 + Double(k) * 0.1)
+        }
+        XCTAssertLessThanOrEqual(ring.count, AudioBlockRing.capacity)
+        let earlyArrival = ring.end - 0.2
+        ring.enqueue(levels: levels, centroids: centroids, count: 10, blockDuration: 0.01, bufferDuration: 0.1, now: earlyArrival)
+        XCTAssertEqual(ring.end, earlyArrival + 0.1, accuracy: 1e-6)
+        XCTAssertEqual(ring.lookup(at: earlyArrival, tolerance: 0.03).level, 0.01, accuracy: 1e-6)
+        ring.removeAll()
+        XCTAssertFalse(ring.lookup(at: 5.0, tolerance: 0.03).isFresh)
+    }
+
+    // MARK: TTS word timing
+
+    func testSpeechTimingIgnoresPunctuationPauses() {
+        let text = "Дед бил, бил, не разбил." as NSString
+        let words = ["Дед", "бил", "бил", "не", "разбил"]
+        let secondsPerLetter: TimeInterval = 0.08
+        let commaPause: TimeInterval = 0.25
+        var timer = SpeechWordTimer()
+        timer.begin(languageCode: "ru-RU", effectiveRate: 1)
+        let mixer = LipSyncMixer()
+
+        var t: TimeInterval = 100
+        var searchFrom = 0
+        var lastStart: TimeInterval = 0
+        var lastSpokenEnd: TimeInterval = 0
+        var maxStretch: TimeInterval = 0
+        for word in words {
+            let range = text.range(of: word, options: [], range: NSRange(location: searchFrom, length: text.length - searchFrom))
+            XCTAssertNotEqual(range.location, NSNotFound)
+            searchFrom = range.location + range.length
+            let boundary = SpeechWordTimer.boundary(after: searchFrom, in: text)
+            let spoken = TimeInterval(word.count) * secondsPerLetter
+            let reported = timer.handleWord(in: text, location: range.location, length: range.length,
+                                            languageCode: "ru-RU", at: t, mixer: mixer)
+            XCTAssertEqual(reported, word)
+            let estimated = timer.estimatedDuration(letters: word.count, boundary: boundary)
+            maxStretch = max(maxStretch, estimated / spoken)
+            lastStart = t
+            lastSpokenEnd = t + spoken
+            // Synthetic TTS: letters at a constant rate, a space, and a pause after punctuation.
+            t += spoken + secondsPerLetter + (boundary.hasPause ? commaPause : 0)
+        }
+        XCTAssertLessThanOrEqual(maxStretch, 1.2, "pauses must not slow the viseme estimate down")
+        XCTAssertEqual(timer.secondsPerCharacter, secondsPerLetter, accuracy: 0.01)
+
+        // Play the schedule at 60 fps: the last word articulates, then the mouth is shut 120 ms after it ends.
+        var time: TimeInterval = 99.9
+        var sample = mixer.sample(at: time)
+        var maxOpenInLastWord: Float = 0
+        let closeBy = lastSpokenEnd + 0.12
+        while time < closeBy {
+            time = min(time + 1.0 / 60.0, closeBy)
+            sample = mixer.sample(at: time)
+            if time >= lastStart && time <= lastSpokenEnd {
+                maxOpenInLastWord = max(maxOpenInLastWord, sample.mouth.open)
+            }
+        }
+        XCTAssertGreaterThan(maxOpenInLastWord, 0.3)
+        XCTAssertLessThan(sample.mouth.open, 0.05, "sentence-final punctuation closes the mouth within 120 ms")
+    }
+
+    func testSpeechWordBoundaryScan() {
+        let text = "Кто там? Я, кот — и всё. Жили-были" as NSString
+        func end(of word: String) -> Int {
+            let range = text.range(of: word)
+            return range.location + range.length
+        }
+        let question = SpeechWordTimer.boundary(after: end(of: "там"), in: text)
+        XCTAssertTrue(question.isQuestion)
+        XCTAssertTrue(question.endsSentence)
+        XCTAssertTrue(question.hasPause)
+        let comma = SpeechWordTimer.boundary(after: end(of: "Я"), in: text)
+        XCTAssertTrue(comma.hasPause)
+        XCTAssertFalse(comma.endsSentence)
+        XCTAssertTrue(SpeechWordTimer.boundary(after: end(of: "кот"), in: text).hasPause, "spaced dash")
+        XCTAssertTrue(SpeechWordTimer.boundary(after: end(of: "всё"), in: text).endsSentence)
+        XCTAssertFalse(SpeechWordTimer.boundary(after: end(of: "Жили"), in: text).hasPause, "in-word hyphen")
+        XCTAssertEqual(SpeechWordTimer.boundary(after: end(of: "Кто"), in: text), SpeechWordTimer.Boundary())
+        XCTAssertEqual(SpeechWordTimer.boundary(after: text.length, in: text), SpeechWordTimer.Boundary())
+
+        // Some voices include the punctuation in the word range: it still counts as the boundary.
+        let attached = "Ты кто?" as NSString
+        let wordEnd = SpeechWordTimer.articulationEnd(in: attached, location: 3, length: 4)
+        XCTAssertEqual(wordEnd, 6)
+        XCTAssertTrue(SpeechWordTimer.boundary(after: wordEnd, in: attached).isQuestion)
+        XCTAssertEqual(SpeechWordTimer.articulationEnd(in: attached, location: 0, length: 2), 2)
+    }
+
+    func testVoiceLanguageMatching() {
+        XCTAssertEqual(SpeechSynthesisDriver.baseLanguage(of: "en-US"), "en")
+        XCTAssertEqual(SpeechSynthesisDriver.baseLanguage(of: "ru_RU"), "ru")
+        XCTAssertEqual(SpeechSynthesisDriver.baseLanguage(of: "RU"), "ru")
+        XCTAssertEqual(SpeechSynthesisDriver.bcp47(for: "en"), "en-US")
+        XCTAssertEqual(SpeechSynthesisDriver.bcp47(for: "ru"), "ru-RU")
+        XCTAssertEqual(SpeechSynthesisDriver.bcp47(for: "en_GB"), "en-GB")
+    }
+
+    // MARK: Estimator details
+
+    func testRussianStressMarksAreIgnored() {
+        func v(_ word: String) -> [Viseme] {
+            TextVisemeEstimator.visemes(forWord: word, languageCode: "ru").map { $0.viseme }
+        }
+        XCTAssertEqual(v("Жи\u{301}ли"), [.ch, .ih, .dd, .ih])
+        XCTAssertEqual(v("молоко\u{301}"), v("молоко"))
+        XCTAssertEqual(v("молоко"), [.pp, .oh, .dd, .oh, .kk, .oh])
+        XCTAssertEqual(v("мо\u{301}й"), [.pp, .oh, .ih], "the breve of й survives")
+        XCTAssertEqual(v("\u{450}ж"), v("еж"))
+        XCTAssertEqual(TextVisemeEstimator.articulatedLength(of: "жи\u{301}ли"), 4)
+        // Accents on Latin letters are not stress marks.
+        XCTAssertEqual(TextVisemeEstimator.visemes(forWord: "café", languageCode: "en").map { $0.viseme }, [.kk, .aa, .ff, .e])
+    }
+
+    func testEnglishSilentLettersAndRoundedOu() {
+        func v(_ word: String) -> [Viseme] {
+            TextVisemeEstimator.visemes(forWord: word, languageCode: "en").map { $0.viseme }
+        }
+        XCTAssertEqual(v("night"), [.nn, .ih, .dd])
+        XCTAssertEqual(v("knight"), [.nn, .ih, .dd])
+        XCTAssertEqual(v("write"), [.rr, .ih, .dd])
+        XCTAssertEqual(v("lamb"), [.dd, .aa, .pp])
+        XCTAssertEqual(v("you"), [.ih, .ou])
+        XCTAssertEqual(v("could"), [.kk, .ou, .dd, .dd])
+        XCTAssertEqual(v("thought"), [.th, .oh, .dd])
+        XCTAssertEqual(v("laugh"), [.dd, .oh, .ff])
+        XCTAssertEqual(v("ghost"), [.kk, .oh, .ss, .dd])
+        XCTAssertEqual(v("house"), [.kk, .aa, .ou, .ss])
+        XCTAssertFalse(v("though").contains(.ff))
+    }
+
+    // MARK: Mixer details
+
+    func testMixerSpeakingTailBridgesShortGaps() {
+        let mixer = LipSyncMixer()
+        let word = LipSyncTrack(keyframes: TextVisemeEstimator.visemes(forWord: "мама", languageCode: "ru"))
+        mixer.schedule(word, startingAt: 10.0)
+        let gapStart = 10.0 + word.duration
+        mixer.schedule(word, startingAt: gapStart + 0.2)
+        XCTAssertTrue(mixer.sample(at: gapStart + 0.1).isSpeaking, "short gaps between words keep isSpeaking")
+        XCTAssertFalse(mixer.sample(at: gapStart + 0.15).isSpeaking)
+        XCTAssertTrue(mixer.sample(at: gapStart + 0.25).isSpeaking)
+    }
+
+    func testQuestionEmphasisHoldsEnergyThroughTheWord() {
+        let track = LipSyncTrack(keyframes: TextVisemeEstimator.visemes(forWord: "мама", languageCode: "ru"))
+        let plain = LipSyncMixer()
+        plain.schedule(track, startingAt: 10, energyGain: 1)
+        let question = LipSyncMixer()
+        question.schedule(track, startingAt: 10, energyGain: SpeechWordTimer.questionEnergyGain)
+        // Middle of the first "м" (lips pressed): normally low energy, held high for the last word of a question.
+        let mid = 10 + track.keyframes[0].duration / 2
+        XCTAssertLessThan(plain.sample(at: mid).energy, 0.6)
+        XCTAssertGreaterThan(question.sample(at: mid).energy, 0.85)
+        XCTAssertEqual(question.sample(at: 10 + track.duration + 0.2).energy, 0)
+    }
+
+    // MARK: Helpers
+
+    private static func toneBuffer(frequency: Double, sampleRate: Double, frames: Int, amplitude: Float) -> AVAudioPCMBuffer? {
+        guard frames > 0,
+              let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+              let channel = buffer.floatChannelData else {
+            return nil
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for i in 0..<frames {
+            channel[0][i] = amplitude * Float(sin(Double(i) * 2 * Double.pi * frequency / sampleRate))
+        }
+        return buffer
     }
 }

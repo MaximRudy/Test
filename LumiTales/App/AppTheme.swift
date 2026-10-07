@@ -5,10 +5,16 @@ import StoryCharacters
 
 /// Tiny two-language helper: Russian when the device language is Russian, English otherwise.
 /// Russian is the primary market, so every string carries both variants side by side.
+///
+/// The decision uses `Locale.preferredLanguages` (the user's device language list) rather than
+/// `Locale.current`, which is resolved against the bundle's localizations and the `ru` development region.
+/// `App/AppLocalizations.xcstrings` gives the bundle both `en` and `ru` localizations so that system
+/// strings and `Locale.current` follow the device language too.
 enum L10n {
-    static var isRussian: Bool {
-        Locale.current.language.languageCode?.identifier == "ru"
-    }
+    static let isRussian: Bool = {
+        let preferred = Locale.preferredLanguages.first ?? Locale.current.identifier
+        return preferred.lowercased().hasPrefix("ru")
+    }()
 
     /// "ru" or "en" — the language code handed to the StoryCharacters display-name helpers.
     static var languageCode: String { isRussian ? "ru" : "en" }
@@ -35,19 +41,70 @@ enum L10n {
     static var silent: String { t("Молчит", "Quiet") }
     static var samplePhrases: String { t("Примеры фраз", "Sample phrases") }
     static var fps: String { t("Кадров в секунду", "Frames per second") }
-    static var stageHint: String { t("Коснись — удивится, потяни — посмотрит", "Tap to poke, drag to look around") }
+    static var stageHint: String {
+        t("Коснитесь — отреагирует, проведите — посмотрит", "Tap to poke, drag to look around")
+    }
     static var selectCharacter: String { t("Выбор персонажа", "Character picker") }
 
     static func qualityName(_ quality: CanvasQuality) -> String {
         switch quality {
-        case .balanced: return t("Баланс", "Balanced")
+        case .balanced: return t("Среднее", "Balanced")
         case .high: return t("Высокое", "High")
         }
     }
 
+    static func rendererName(_ renderer: CharacterRenderer) -> String {
+        switch renderer {
+        case .automatic: return rendererAuto
+        case .metal: return "Metal"
+        case .swiftUI: return "SwiftUI"
+        }
+    }
+
+    static func framesPerSecond(_ value: Int) -> String { t("\(value) к/с", "\(value) fps") }
+    static var framesPerSecondUnknown: String { t("– к/с", "– fps") }
+
+    /// "3–6 лет" / "Ages 3–6". A value that already carries words (e.g. "3–6 years") is shown as is.
+    /// The Russian unit agrees with the last number of the range (год / года / лет).
+    static func ageRange(_ range: String) -> String {
+        let trimmed = range.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !trimmed.contains(where: { $0.isLetter }) else { return trimmed }
+        guard isRussian else { return "Ages \(trimmed)" }
+
+        var lastNumber = 0
+        var multiplier = 1
+        var digitCount = 0
+        for character in trimmed.reversed() {
+            if character.isASCII, let digit = character.wholeNumberValue {
+                if digitCount < 6 {
+                    lastNumber += digit * multiplier
+                    multiplier *= 10
+                }
+                digitCount += 1
+            } else if digitCount > 0 {
+                break
+            }
+        }
+        let mod10 = lastNumber % 10
+        let mod100 = lastNumber % 100
+        let unit: String
+        if mod10 == 1 && mod100 != 11 {
+            unit = "год"
+        } else if (2...4).contains(mod10) && !(12...14).contains(mod100) {
+            unit = "года"
+        } else {
+            unit = "лет"
+        }
+        return "\(trimmed) \(unit)"
+    }
+
     // Stories
-    static var generate: String { t("Сочинить", "Generate") }
-    static var generateTitle: String { t("Сочинить сказку", "Generate a tale") }
+    static var generate: String { t("Сочинить сказку", "Generate") }
+    static var generateTitle: String { t("Новая сказка", "New tale") }
+    static var generateHint: String {
+        t("Выберите героя, место и рассказчика — сказка сочинится сама.",
+          "Pick a hero, a place and a narrator, and a tale writes itself.")
+    }
     static var yourStories: String { t("Ваши сказки", "Your stories") }
     static var library: String { t("Библиотека", "Library") }
     static var noStories: String { t("Сказок пока нет", "No stories yet") }
@@ -68,7 +125,7 @@ enum L10n {
     }
 
     // Player
-    static var play: String { t("Играть", "Play") }
+    static var play: String { t("Слушать", "Play") }
     static var pause: String { t("Пауза", "Pause") }
     static var resume: String { t("Продолжить", "Resume") }
     static var replay: String { t("Ещё раз", "Play again") }
@@ -76,6 +133,7 @@ enum L10n {
     static var previousSegment: String { t("Предыдущая часть", "Previous part") }
     static var storyProgress: String { t("Прогресс сказки", "Story progress") }
     static var narratedBy: String { t("Рассказывает", "Narrated by") }
+    static var storyText: String { t("Текст сказки", "Story text") }
 
     static func segmentCounter(current: Int, total: Int) -> String {
         t("Часть \(current) из \(total)", "Part \(current) of \(total)")
@@ -83,8 +141,8 @@ enum L10n {
 
     static func playerState(_ state: StoryPlayer.State) -> String {
         switch state {
-        case .idle: return t("Готово", "Ready")
-        case .playing: return t("Играет", "Playing")
+        case .idle: return t("Можно начинать", "Ready")
+        case .playing: return t("Читаю", "Playing")
         case .paused: return t("Пауза", "Paused")
         case .finished: return t("Конец", "The end")
         }
@@ -97,6 +155,9 @@ enum L10n {
 enum AppTheme {
     /// Warm golden accent (matches Assets.xcassets/AccentColor).
     static let accent = Color(.sRGB, red: 1.0, green: 0.824, blue: 0.416, opacity: 1.0)
+    /// Dark brown label colour for controls filled with `accent` (`.glassProminent` buttons): white on the
+    /// light gold tint would be about 1.4:1, this is well above 4.5:1.
+    static let onAccent = Color(.sRGB, red: 0.16, green: 0.10, blue: 0.04, opacity: 1.0)
     static let panelRadius: CGFloat = 24
     static let controlRadius: CGFloat = 14
 
@@ -121,21 +182,29 @@ enum AppTheme {
     }
 }
 
-// MARK: - Liquid Glass helpers
+// MARK: - Panels
 
-/// Rounded Liquid Glass panel used for every grouped control block.
-struct GlassPanelModifier: ViewModifier {
+/// Plain translucent card for content and grouped controls (story rows, karaoke text, control groups).
+/// Liquid Glass (`glassEffect`, `.glass` / `.glassProminent` buttons, `GlassEffectContainer`) is reserved for
+/// the floating control layer — transport bar, FPS badge, emotion caption, primary buttons — so glass never
+/// sits on glass and scrolling content costs no extra sampling passes.
+struct ContentPanelModifier: ViewModifier {
     var cornerRadius: CGFloat
 
     func body(content: Content) -> some View {
         content
-            .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(0.07))
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+            }
     }
 }
 
 extension View {
-    func glassPanel(cornerRadius: CGFloat = AppTheme.panelRadius) -> some View {
-        modifier(GlassPanelModifier(cornerRadius: cornerRadius))
+    func contentPanel(cornerRadius: CGFloat = AppTheme.panelRadius) -> some View {
+        modifier(ContentPanelModifier(cornerRadius: cornerRadius))
     }
 }
 
@@ -183,7 +252,7 @@ struct StarFieldView: View {
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: isPaused || reduceMotion)) { timeline in
-            Canvas(rendersAsynchronously: true) { context, size in
+            Canvas { context, size in
                 StarFieldView.draw(in: &context,
                                    size: size,
                                    time: timeline.date.timeIntervalSinceReferenceDate,
@@ -193,8 +262,11 @@ struct StarFieldView: View {
         .allowsHitTesting(false)
     }
 
+    /// Draws `count` round stars. Pure arithmetic on value types — no allocations besides the paths.
     private static func draw(in context: inout GraphicsContext, size: CGSize, time: TimeInterval, count: Int) {
-        guard size.width > 0, size.height > 0 else { return }
+        let width = Double(size.width)
+        let height = Double(size.height)
+        guard width > 0, height > 0 else { return }
         var index = 0
         while index < count {
             let seedBase = Double(index)
@@ -203,15 +275,18 @@ struct StarFieldView: View {
             let s3 = hash(seedBase * 37.719 + 4.2)
             let s4 = hash(seedBase * 93.989 + 8.1)
 
-            let x = s1 * size.width
-            let y = s2 * size.height
+            let x = s1 * width
+            let y = s2 * height
             let period = 1.6 + 2.8 * s3
             let phase = s4 * 2.0 * Double.pi
             let twinkle = 0.5 + 0.5 * sin(time * (2.0 * Double.pi / period) + phase)
             let radius = 0.6 + 1.2 * s4 + 0.7 * twinkle
             let alpha = 0.2 + 0.7 * twinkle * (0.4 + 0.6 * s3)
 
-            let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2.0, height: radius * 2.0)
+            let rect = CGRect(x: CGFloat(x - radius),
+                              y: CGFloat(y - radius),
+                              width: CGFloat(radius * 2.0),
+                              height: CGFloat(radius * 2.0))
             context.fill(Path(ellipseIn: rect), with: .color(Color.white.opacity(alpha)))
             index += 1
         }

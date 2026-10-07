@@ -6,6 +6,10 @@ import simd
 /// Everything a renderer or the rig needs to know about a character — silhouette, palette, face layout,
 /// framing, idle motion, personality and voice — lives in the static designs declared in the per-character
 /// files (`Lumi.swift`, `Spark.swift`, …). Nothing character-specific is hard-coded anywhere else.
+///
+/// Voices: designs set only pitch and rate and leave `preferredVoiceIdentifiers` empty, so
+/// `SpeechSynthesisDriver` picks the best installed voice for each utterance's language (premium/enhanced
+/// first). Russian and English text are therefore both spoken by a native voice.
 public enum CharacterCatalog {
 
     /// The design for a kind. O(1): returns a stored static value, no allocation.
@@ -75,13 +79,4 @@ extension CharacterCatalog {
                 teeth: SIMD4<Float>(hex: teeth),
                 outline: SIMD4<Float>(hex: outline))
     }
-
-    /// Preferred Russian voices, first available wins. Compact Milena ships with every iOS install; the enhanced
-    /// variant is picked up when the user has downloaded it; the legacy bundle id covers older identifier schemes.
-    /// Unknown identifiers are harmless — `SpeechSynthesisDriver` falls back to the best voice for the language.
-    static let russianVoiceIdentifiers: [String] = [
-        "com.apple.voice.enhanced.ru-RU.Milena",
-        "com.apple.voice.compact.ru-RU.Milena",
-        "com.apple.ttsbundle.Milena-compact",
-    ]
 }

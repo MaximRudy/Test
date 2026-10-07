@@ -80,10 +80,15 @@ struct CharacterMetalRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ view: CharacterMTKView, context: Context) {
+        let renderer = context.coordinator
+        // A parent may hand a different rig to the same view identity: draw the new one from the next frame on.
+        if renderer.rig !== rig {
+            renderer.rig = rig
+        }
         if view.preferredFramesPerSecond != preferredFramesPerSecond {
             view.preferredFramesPerSecond = preferredFramesPerSecond
         }
-        context.coordinator.isPaused = isPaused
+        renderer.isPaused = isPaused
     }
 
     static func dismantleUIView(_ view: CharacterMTKView, coordinator: CharacterMetalRenderer) {

@@ -89,6 +89,23 @@ final class CoreAnimationTests: XCTestCase {
         XCTAssertEqual(spring.velocity, 0)
     }
 
+    func testSpringIgnoresNonFiniteStepAndClampsLongSteps() {
+        var spring = ScalarSpring(value: 0.25, stiffness: 600)
+        spring.update(target: 1, dt: .infinity)
+        spring.update(target: 1, dt: .nan)
+        XCTAssertEqual(spring.value, 0.25)
+        XCTAssertEqual(spring.velocity, 0)
+        // 10 s in one call is clamped to 64 sub-steps of 1/60 s: a stiff spring stays finite and settles.
+        spring.update(target: 1, dt: 10)
+        XCTAssertTrue(spring.value.isFinite)
+        XCTAssertEqual(spring.value, 1, accuracy: 1e-3)
+
+        var face = Spring<FacePose>(value: .zero, stiffness: 140 * 2.5)
+        face.update(target: .neutral, dt: 30)
+        XCTAssertTrue(face.value.eyeOpenL.isFinite)
+        XCTAssertEqual(face.value.eyeOpenL, 1, accuracy: 1e-2)
+    }
+
     // MARK: - Noise and curves
 
     func testSmoothNoiseBounded() {
@@ -174,16 +191,138 @@ final class CoreAnimationTests: XCTestCase {
         XCTAssertEqual(maxAbs(player.evaluate(at: 2)), 0, accuracy: 1e-6)
     }
 
+    /// Kids mash `poke()`: a third gesture arriving while the first is still fading out must not drop it,
+    /// and the old clip ending mid-fade must not snap the new one to full weight.
+    func testGesturePlayerSurvivesRapidInterruptions() {
+        var player = GesturePlayer()
+        player.play(GestureClip(gesture: .wave, duration: 1.6), at: 0)
+        let interruptions: [(time: Float, clip: GestureClip)] = [
+            (0.80, GestureClip(gesture: .giggle, duration: 1.4)),
+            (0.83, GestureClip(gesture: .wink, duration: 0.8)),
+            (0.86, GestureClip(gesture: .shy, duration: 2.2)),
+        ]
+        let step: Float = 1.0 / 240.0
+        var next = 0
+        var t: Float = 0
+        var previous = player.evaluate(at: 0)
+        var maxDelta: Float = 0
+        while t < 3.5 {
+            t += step
+            while next < interruptions.count && interruptions[next].time <= t {
+                player.play(interruptions[next].clip, at: interruptions[next].time)
+                next += 1
+            }
+            let d = player.evaluate(at: t)
+            maxDelta = max(maxDelta, maxAbs(d - previous))
+            previous = d
+        }
+        XCTAssertEqual(next, interruptions.count)
+        XCTAssertLessThan(maxDelta, 0.1, "interrupting twice within 120 ms must stay continuous")
+        XCTAssertNil(player.activeGesture)
+        XCTAssertEqual(maxAbs(player.evaluate(at: 4)), 0, accuracy: 1e-6)
+    }
+
+    // MARK: - Idle, blink
+
+    /// Emotion changes swap the idle amplitudes in one step; the idle layer must low-pass them.
+    func testIdleAmplitudesDoNotPopOnEmotionChange() {
+        var design = testDesign()
+        design.idle = IdleStyle(floatAmplitude: 0.05, floatFrequency: 0.8, wobbleAmplitude: 0.05, wobbleFrequency: 0.8)
+        design.features.insert(.jelly)
+        var idle = IdleMotion(seed: 9)
+        let dt: Float = 1.0 / 60.0
+        var profile = EmotionProfile.profile(for: .excited)
+        var emotion: Emotion = .neutral
+        var previous: CharacterPose? = nil
+        var maxOffset: Float = 0
+        var maxTilt: Float = 0
+        var maxNod: Float = 0
+        for frame in 0..<330 {
+            // Frame 169 is the top of the 0.8 Hz bob and wobble: an unsmoothed switch drops ≈ 0.07 R there.
+            if frame == 169 { profile = EmotionProfile.profile(for: .sad) }
+            if frame == 260 {
+                profile = EmotionProfile.profile(for: .sleepy)
+                emotion = .sleepy
+            }
+            let out = idle.update(time: Float(frame) * dt, dt: frame == 0 ? 0 : dt, design: design, profile: profile,
+                                  emotion: emotion, variety: 1, motionScale: 1)
+            if let p = previous {
+                maxOffset = max(maxOffset, abs(out.delta.body.offsetY - p.body.offsetY))
+                maxTilt = max(maxTilt, abs(out.delta.body.tilt - p.body.tilt))
+                maxNod = max(maxNod, abs(out.delta.face.headNod - p.face.headNod))
+            }
+            XCTAssertGreaterThanOrEqual(out.delta.body.breathe, -1)
+            XCTAssertLessThanOrEqual(out.delta.body.breathe, 1)
+            previous = out.delta
+        }
+        XCTAssertLessThan(maxOffset, 0.015)
+        XCTAssertLessThan(maxTilt, 0.015)
+        XCTAssertLessThan(maxNod, 0.01)
+    }
+
+    func testBlinkDoesNotFlutterWhenHeavinessChangesMidBlink() {
+        var blink = BlinkController(seed: 3)
+        let dt: Float = 1.0 / 120.0
+        var t: Float = 0
+        var heaviness: Float = 0
+        var switchedAt: Float = -1
+        var previous: Float = 1
+        var maxDrop: Float = 0
+        while t < 6 {
+            let m = blink.update(time: t, dt: dt, blinkRate: 1, heaviness: heaviness)
+            if switchedAt >= 0 && t - switchedAt < 0.5 {
+                maxDrop = max(maxDrop, previous - m)
+            }
+            if switchedAt < 0 && m == 0 {
+                // Lids shut (hold phase): the emotion turns sleepy right now.
+                switchedAt = t
+                heaviness = 0.55
+            }
+            previous = m
+            t += dt
+        }
+        XCTAssertGreaterThanOrEqual(switchedAt, 0, "a blink must happen")
+        XCTAssertLessThan(maxDrop, 0.02, "the lids must not re-close after the heaviness change")
+    }
+
+    func testBlinkSuppressionReopensBlinkInFlight() {
+        var blink = BlinkController(seed: 3)
+        let dt: Float = 1.0 / 120.0
+        var t: Float = 0
+        while t < 6 {
+            if blink.update(time: t, dt: dt, blinkRate: 1, heaviness: 0) == 0 { break }
+            t += dt
+        }
+        XCTAssertLessThan(t, 6, "a blink must happen")
+        blink.suppress(for: 1.2)
+        let start = t
+        var previous: Float = 0
+        var minAfterReopen: Float = 1
+        while t < start + 1.15 {
+            t += dt
+            let m = blink.update(time: t, dt: dt, blinkRate: 1, heaviness: 0)
+            if t - start < 0.15 {
+                XCTAssertGreaterThanOrEqual(m, previous - 1e-6, "the aborted blink only opens")
+            } else {
+                minAfterReopen = min(minAfterReopen, m)
+            }
+            previous = m
+        }
+        XCTAssertEqual(minAfterReopen, 1, accuracy: 1e-6, "no blink while suppressed")
+    }
+
     // MARK: - Rig
 
     func testRigSmoothnessWhenSwitchingEmotions() {
-        let rig = CharacterRig(design: testDesign())
+        let rig = makeRig()
         rig.isBlinkingEnabled = false
         var time: TimeInterval = 100
         var previous = rig.pose(at: time)
         var maxEye: Float = 0
         var maxMouth: Float = 0
         var maxScale: Float = 0
+        var maxOffsetY: Float = 0
+        var maxTilt: Float = 0
         var frame = 0
         let emotions: [Emotion] = Emotion.allCases + [.laughing, .surprised, .sleepy, .excited, .sad, .surprised, .laughing]
         while frame < emotions.count * 30 {
@@ -195,16 +334,21 @@ final class CoreAnimationTests: XCTestCase {
             maxEye = max(maxEye, abs(pose.face.eyeOpenL - previous.face.eyeOpenL))
             maxMouth = max(maxMouth, abs(pose.face.mouth.open - previous.face.mouth.open))
             maxScale = max(maxScale, abs(pose.body.scaleY - previous.body.scaleY))
+            maxOffsetY = max(maxOffsetY, abs(pose.body.offsetY - previous.body.offsetY))
+            maxTilt = max(maxTilt, abs(pose.body.tilt - previous.body.tilt))
             previous = pose
             frame += 1
         }
         XCTAssertLessThan(maxEye, 0.25)
         XCTAssertLessThan(maxMouth, 0.25)
         XCTAssertLessThan(maxScale, 0.25)
+        // Idle amplitudes follow the emotion smoothly (the scared tremble alone moves tilt ≈ 0.017 per frame).
+        XCTAssertLessThan(maxOffsetY, 0.02)
+        XCTAssertLessThan(maxTilt, 0.035)
     }
 
     func testRigPoseIsDeterministicForRepeatedTime() {
-        let rig = CharacterRig(design: testDesign())
+        let rig = makeRig()
         rig.set(emotion: .happy)
         var time: TimeInterval = 1_000
         for _ in 0..<30 {
@@ -221,7 +365,7 @@ final class CoreAnimationTests: XCTestCase {
     }
 
     func testRigFirstCallUsesZeroDeltaAndClampsLongGaps() {
-        let rig = CharacterRig(design: testDesign())
+        let rig = makeRig()
         let first = rig.pose(at: 50)
         XCTAssertEqual(first.time, 0, accuracy: 1e-6)
         rig.set(emotion: .excited)
@@ -234,8 +378,22 @@ final class CoreAnimationTests: XCTestCase {
         XCTAssertEqual(later.time, rig.configuration.maxDeltaTime, accuracy: 1e-5)
     }
 
+    func testRigIgnoresNonFiniteTimeAndUnboundedDeltaStaysFinite() {
+        let rig = makeRig(RigConfiguration(maxDeltaTime: .infinity))
+        let first = rig.pose(at: 5)
+        XCTAssertEqual(rig.pose(at: .infinity), first)
+        XCTAssertEqual(rig.pose(at: .nan), first)
+        rig.set(emotion: .surprised)
+        // With an unbounded maxDeltaTime a 20 s gap reaches the springs whole; they must stay finite.
+        let later = rig.pose(at: 25)
+        XCTAssertTrue(later.face.eyeOpenL.isFinite)
+        XCTAssertTrue(later.face.gazeX.isFinite)
+        XCTAssertTrue(later.body.scaleY.isFinite)
+        XCTAssertTrue(later.time.isFinite)
+    }
+
     func testRigEmotionConvergesToProfile() {
-        let rig = CharacterRig(design: testDesign(), configuration: RigConfiguration(idleVariety: 0))
+        let rig = makeRig(RigConfiguration(idleVariety: 0))
         rig.isBlinkingEnabled = false
         rig.set(emotion: .sad)
         var time: TimeInterval = 10
@@ -253,7 +411,7 @@ final class CoreAnimationTests: XCTestCase {
     }
 
     func testRigGesturesStartAndFinish() {
-        let rig = CharacterRig(design: testDesign())
+        let rig = makeRig()
         var time: TimeInterval = 0
         rig.pose(at: time)
         rig.play(.wave)
@@ -274,7 +432,7 @@ final class CoreAnimationTests: XCTestCase {
     }
 
     func testRigPokeAndLookTarget() {
-        let rig = CharacterRig(design: testDesign())
+        let rig = makeRig()
         rig.pose(at: 0)
         rig.poke()
         XCTAssertNotNil(rig.activeGesture)
@@ -298,7 +456,7 @@ final class CoreAnimationTests: XCTestCase {
     }
 
     func testRigAttachedLipSyncDrivesMouthAndSpeakingFlag() {
-        let rig = CharacterRig(design: testDesign())
+        let rig = makeRig()
         rig.set(emotion: .happy)
         let source = FixedLipSyncSource()
         source.current = LipSyncSample(mouth: Viseme.aa.shape, energy: 0.8, isSpeaking: true, wordOnset: 1)
@@ -324,7 +482,7 @@ final class CoreAnimationTests: XCTestCase {
     }
 
     func testRigResetReturnsToNeutral() {
-        let rig = CharacterRig(design: testDesign())
+        let rig = makeRig()
         rig.set(emotion: .excited)
         rig.play(.celebrate)
         rig.pose(at: 3)
@@ -342,6 +500,82 @@ final class CoreAnimationTests: XCTestCase {
         XCTAssertEqual(CharacterRig.expandLanguageCode("de-DE"), "de-DE")
     }
 
+    func testSpeechLanguageResolution() {
+        // Explicit wins.
+        XCTAssertEqual(CharacterRig.resolveLanguage("ru", text: "Hello", configured: nil), "ru-RU")
+        // Detection beats the configured default…
+        XCTAssertEqual(CharacterRig.resolveLanguage(nil, text: "Hello there", configured: "ru"), "en-US")
+        XCTAssertEqual(CharacterRig.resolveLanguage(nil, text: "Привет, Lumi!", configured: nil), "ru-RU")
+        // …but a configured code of the same language refines the region.
+        XCTAssertEqual(CharacterRig.resolveLanguage(nil, text: "Hello", configured: "en-GB"), "en-GB")
+        // No letters: the configured default applies.
+        XCTAssertEqual(CharacterRig.resolveLanguage(nil, text: "123 … 42!", configured: "ru"), "ru-RU")
+        XCTAssertNil(CharacterRig.detectedLanguage(of: "🙂 2 + 2"))
+        XCTAssertEqual(CharacterRig.baseLanguage(of: "en-GB"), "en")
+    }
+
+    func testAutoSleepIsKeptAwakeBySpeechAndWakesUpOnPoke() {
+        let rig = makeRig(RigConfiguration(autoSleepAfter: 2))
+        rig.set(emotion: .happy, intensity: 0.8)
+        let source = FixedLipSyncSource()
+        source.current = LipSyncSample(mouth: Viseme.aa.shape, energy: 0.5, isSpeaking: true, wordOnset: 0)
+        rig.attach(lipSync: source)
+        var time: TimeInterval = 0
+        rig.pose(at: time)
+        for _ in 0..<180 {
+            time += 1.0 / 60.0
+            rig.pose(at: time)
+        }
+        XCTAssertEqual(rig.emotion, .happy, "talking counts as activity")
+        source.current = .silent
+        for _ in 0..<150 {
+            time += 1.0 / 60.0
+            rig.pose(at: time)
+        }
+        XCTAssertEqual(rig.emotion, .sleepy, "dozes off after 2 s of silence")
+        XCTAssertEqual(rig.activeGesture, .yawn)
+        rig.poke()
+        XCTAssertEqual(rig.emotion, .happy, "waking up restores the previous emotion")
+        XCTAssertEqual(rig.emotionIntensity, 0.8, accuracy: 1e-6)
+        XCTAssertEqual(rig.activeGesture, .wakeUp)
+    }
+
+    func testJellyDesignsWobbleOnAfterAHop() {
+        var design = testDesign()
+        design.features.insert(.jelly)
+        let rig = CharacterRig(design: design, configuration: RigConfiguration(respectsReduceMotion: false, idleVariety: 0),
+                               seed: 2)
+        rig.isBlinkingEnabled = false
+        var time: TimeInterval = 0
+        rig.pose(at: time)
+        rig.play(.bounce)   // 0.8 s at neutral energy
+        var wobbleAfterClip: Float = 0
+        for _ in 0..<240 {
+            time += 1.0 / 60.0
+            let pose = rig.pose(at: time)
+            if time > 0.82 && time < 1.3 {
+                wobbleAfterClip = max(wobbleAfterClip, abs(pose.body.scaleY - 1))
+            }
+        }
+        XCTAssertNil(rig.activeGesture)
+        XCTAssertGreaterThan(wobbleAfterClip, 0.005, "the jelly keeps wobbling after the hop ends")
+        XCTAssertEqual(rig.currentPose.body.scaleY, 1, accuracy: 0.002, "and settles back")
+    }
+
+    func testRigsWithDifferentSeedsDoNotBlinkInUnison() {
+        let a = makeRig(seed: 1)
+        let b = makeRig(seed: 2)
+        var time: TimeInterval = 0
+        var differingFrames = 0
+        for _ in 0..<600 {
+            let pa = a.pose(at: time)
+            let pb = b.pose(at: time)
+            if abs(pa.face.eyeOpenL - pb.face.eyeOpenL) > 0.5 { differingFrames += 1 }
+            time += 1.0 / 60.0
+        }
+        XCTAssertGreaterThan(differingFrames, 0)
+    }
+
     func testBlinkControllerMultiplierInRange() {
         var blink = BlinkController(seed: 3)
         var t: Float = 0
@@ -357,6 +591,11 @@ final class CoreAnimationTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Deterministic rig (fixed schedules) built on `testDesign()`.
+    private func makeRig(_ configuration: RigConfiguration = RigConfiguration(), seed: UInt64 = 1) -> CharacterRig {
+        CharacterRig(design: testDesign(), configuration: configuration, seed: seed)
+    }
 
     /// A self-contained design so the tests do not depend on the Characters module's catalog values.
     private func testDesign() -> CharacterDesign {

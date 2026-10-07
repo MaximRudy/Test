@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Renderer facade (CONTRACT §4.5): Metal when requested (or `.automatic` on a device that has a GPU),
-/// the SwiftUI `Canvas` renderer otherwise.
+/// Renderer facade (CONTRACT §4.5): Metal when it is requested (`.metal` or `.automatic`) and a GPU device exists,
+/// the SwiftUI `Canvas` renderer otherwise (e.g. `.metal` on a host without Metal falls back instead of going blank).
 public struct CharacterView: View {
     private let rig: CharacterRig
     private let renderer: CharacterRenderer
@@ -23,12 +23,10 @@ public struct CharacterView: View {
 
     private var usesMetal: Bool {
         switch renderer {
-        case .metal:
-            return true
+        case .metal, .automatic:
+            return MetalAvailability.isSupported
         case .swiftUI:
             return false
-        case .automatic:
-            return MetalAvailability.isSupported
         }
     }
 }

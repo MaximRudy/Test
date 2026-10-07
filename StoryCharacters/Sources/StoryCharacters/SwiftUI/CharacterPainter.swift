@@ -8,13 +8,24 @@ import simd
 enum CharacterPainter {
 
     /// Draws one frame. `size` is the Canvas size in points; the body radius and origin follow `CanonicalSpace`.
+    /// `@MainActor` because the per-kind resource cache is main-actor state (the Canvas closure that calls this
+    /// already runs on the main actor, since it also calls `rig.pose(at:)`).
     @MainActor
     static func draw(pose: CharacterPose, design: CharacterDesign, in context: inout GraphicsContext,
                      size: CGSize, quality: CanvasQuality) {
         guard size.width >= 2, size.height >= 2 else { return }
+        // A non-finite channel (NaN from a broken rig input) would trap in `Int(_:)` conversions further down;
+        // fall back to the neutral pose for that frame instead.
+        let safePose = isFinite(pose) ? pose : CharacterPose(time: pose.time.isFinite ? pose.time : 0)
         let resources = CharacterColors.resources(for: design)
-        let scene = CanvasScene(pose: pose, design: design, size: size, quality: quality, resources: resources)
+        let scene = CanvasScene(pose: safePose, design: design, size: size, quality: quality, resources: resources)
         scene.draw(in: &context)
+    }
+
+    /// True when every pose channel (and the time) is finite.
+    static func isFinite(_ pose: CharacterPose) -> Bool {
+        let total = pose.face.v.sum() + pose.face.mouth.v.sum() + pose.body.v.sum() + pose.effects.v.sum() + pose.time
+        return total.isFinite
     }
 }
 
@@ -119,7 +130,11 @@ struct CanvasScene {
                                                              y: faceOffsetY + CGFloat(0.06 * f.headNod)))
         let headTransform = bodyTransform.prepending(headUnit)
 
-        let unitPath = resources.staticBody ?? CharacterPaths.body(shape: design.bodyShape, wiggle: CGFloat(b.wiggle))
+        // `.flicker` flames ripple with 0.012·sin(time·(8 + 6·flickerRate) + 7y) (same term as the MSL `sdFlame`).
+        let flicker: CGFloat = design.features.contains(.flicker) ? 0.012 : 0
+        let flickerPhase = CGFloat(pose.time) * (8 + 6 * CGFloat(design.idle.flickerRate))
+        let unitPath = resources.staticBody ?? CharacterPaths.body(shape: design.bodyShape, wiggle: CGFloat(b.wiggle),
+                                                                   flickerPhase: flickerPhase, flicker: flicker)
 
         radius = r
         base = baseTransform
@@ -141,21 +156,31 @@ struct CanvasScene {
 
     /// Draw order (back → front): glow, dome base, robe back, legs, arms, body (+ inner flame, dark face),
     /// robe front, cap & leaves, brain, moon, cloud curl, face, book & wand, effects, sparkles, dome glass.
+    ///
+    /// With `.hood` the body layers are drawn through a context clipped to the robe's face opening (§3.6: the body
+    /// shows only through the opening, so the star tips sit inside the hood). The face is clipped like the MSL
+    /// `faceClip`: to the silhouette, and for hoods also to the opening minus the robe front.
     func draw(in ctx: inout GraphicsContext) {
+        let hood = features.contains(.hood)
         drawGlow(in: &ctx)
         if features.contains(.dome) { drawDomeBase(in: &ctx) }
-        if features.contains(.hood) { drawRobeBack(in: &ctx) }
+        if hood { drawRobeBack(in: &ctx) }
         if features.contains(.legs) { drawLegs(in: &ctx) }
         if features.contains(.arms) { drawArms(in: &ctx) }
-        drawBody(in: &ctx)
-        if features.contains(.innerFlame) { drawInnerFlame(in: &ctx) }
-        if features.contains(.darkFace) { drawDarkFace(in: &ctx) }
-        if features.contains(.hood) { drawRobeFront(in: &ctx) }
+        var inner = ctx
+        if hood { inner.clip(to: body.path(res.robeOpening)) }
+        drawBody(in: &inner)
+        if features.contains(.innerFlame) { drawInnerFlame(in: &inner) }
+        if features.contains(.darkFace) { drawDarkFace(in: &inner) }
+        if hood { drawRobeFront(in: &ctx) }
         if features.contains(.leaves) { drawCapAndLeaves(in: &ctx) }
         if features.contains(.brain) { drawBrain(in: &ctx) }
         if features.contains(.moonMark) { drawMoonMark(in: &ctx) }
         if features.contains(.cloudCurl) { drawCloudCurl(in: &ctx) }
-        drawFace(in: &ctx)
+        var face = inner
+        face.clip(to: bodyPath)
+        if hood { face.clip(to: body.path(res.robeFrontMask), options: .inverse) }
+        drawFace(in: &face)
         if features.contains(.bookAndWand) { drawBookAndWand(in: &ctx) }
         drawEffects(in: &ctx)
         if features.contains(.dome) {
@@ -172,15 +197,19 @@ struct CanvasScene {
         guard glowAlpha > 0.01 else { return }
         switch quality {
         case .high:
-            // Blurred, slightly inflated copy of the silhouette; the blur gives the exp(−d/0.35) falloff.
-            let inflated = bodyUnitPath.applying(CGAffineTransform(scaleX: 1.08, y: 1.08))
-            let glowPath = body.path(inflated)
-            let blur = radius * 0.22
+            // One blurred group: the silhouette (α 1) plus a 0.30-wide outer band (α 0.35), blurred by 0.30 R.
+            // Relative to the edge value this gives ≈ 0.37 at d = 0.35 and ≈ 0.06 at d = 0.70, close to
+            // exp(−d/0.35) (0.37 / 0.135); the group opacity is boosted so the edge reaches `glowAlpha`.
+            // The filter is set on a context copy and the shapes are grouped in one layer, so a single blur runs.
+            let glowPath = bodyPath
+            let bandWidth = body.length(0.60)
             let color = res.glow
-            let alpha = Double(glowAlpha)
-            ctx.drawLayer { layer in
-                layer.addFilter(.blur(radius: blur))
-                layer.opacity = alpha
+            let bandColor = res.glowBand
+            var glowCtx = ctx
+            glowCtx.addFilter(.blur(radius: radius * 0.30))
+            glowCtx.opacity = Double(min(1, glowAlpha * 1.6))
+            glowCtx.drawLayer { layer in
+                layer.stroke(glowPath, with: .color(bandColor), lineWidth: bandWidth)
                 layer.fill(glowPath, with: .color(color))
             }
         case .balanced:
@@ -196,26 +225,31 @@ struct CanvasScene {
     // MARK: - Body (§3.5)
 
     func drawBody(in ctx: inout GraphicsContext) {
-        // Highlight ellipse at (−0.35, 0.45), radii (0.35, 0.22), tilted 30° so it follows the upper-left curvature.
-        let highlight = body.path(CharacterPaths.ellipse(center: CGPoint(x: -0.35, y: 0.45), rx: 0.35, ry: 0.22, rotation: 0.5236))
-        let silhouette = bodyPath
-        let shading = bodyShading
-        let highlightColor = res.highlightSoft
-        let rimSoft = res.rimShadowSoft
-        let rim = res.rimShadow
-        let softWidth = body.length(0.30)
-        let rimWidth = body.length(0.16)
-        ctx.drawLayer { layer in
-            layer.clip(to: silhouette)
-            layer.fill(silhouette, with: shading)
-            layer.fill(highlight, with: .color(highlightColor))
-            // Rim darkening: strokes centred on the edge, clipped to the inside → 0.08 (and a softer 0.15) band.
-            layer.stroke(silhouette, with: .color(rimSoft), lineWidth: softWidth)
-            layer.stroke(silhouette, with: .color(rim), lineWidth: rimWidth)
-        }
+        var c = ctx
+        c.clip(to: bodyPath)
+        c.fill(bodyPath, with: bodyShading)
+
+        // Soft highlight ellipse at (−0.35, 0.45), radii (0.35, 0.22), rotated −30° (§3.5): a unit disc mapped onto
+        // the ellipse and filled with a radial gradient, α (1 − smoothstep(0.35, 1, ρ))·0.35 as in the MSL.
+        let toEllipse = CGAffineTransform(scaleX: 0.35, y: 0.22)
+            .concatenating(CGAffineTransform(rotationAngle: -0.5236))
+            .concatenating(CGAffineTransform(translationX: -0.35, y: 0.45))
+            .concatenating(body.matrix)
+        var h = c
+        h.concatenate(toEllipse)
+        h.fill(res.unitDisc, with: .radialGradient(res.highlightGradient, center: .zero, startRadius: 0, endRadius: 1))
+
+        // Rim darkening towards `palette.shadow` with α 0.35·rim², rim = (d + 0.08)/0.08 (§3.5): four nested strokes
+        // centred on the edge (clipped to the inside, so each covers half its width) build the quadratic ramp —
+        // ≈ 0.30 within 0.012 of the edge, 0.19 by 0.03, 0.07 by 0.055, 0.02 by 0.08.
+        c.stroke(bodyPath, with: .color(res.rimBand1), lineWidth: body.length(0.160))
+        c.stroke(bodyPath, with: .color(res.rimBand2), lineWidth: body.length(0.110))
+        c.stroke(bodyPath, with: .color(res.rimBand3), lineWidth: body.length(0.060))
+        c.stroke(bodyPath, with: .color(res.rimBand4), lineWidth: body.length(0.024))
     }
 
-    /// `.innerFlame`: lighter drop at scale 0.58, offset (0, −0.18), `palette.accent` α 0.85; `accessory2` swells it.
+    /// `.innerFlame`: lighter drop at scale 0.58, offset (0, −0.18), α 0.85 (`palette.accent`, or `palette.highlight`
+    /// for `.dome` designs — see `CanvasResources.innerFlame`); `accessory2` swells it.
     func drawInnerFlame(in ctx: inout GraphicsContext) {
         let k: CGFloat = 0.58 * (1 + 0.10 * CGFloat(min(max(pose.body.accessory2, 0), 1)))
         let unit = CharacterPaths.dropBody(wiggle: wiggle + 0.9)
@@ -223,10 +257,15 @@ struct CanvasScene {
         ctx.fill(body.path(unit), with: .color(res.innerFlame))
     }
 
-    /// `.darkFace`: dark inner ellipse at (0, −0.08), radii (0.72, 0.80), `palette.accent`.
+    /// `.darkFace`: dark inner ellipse at (0, −0.08), radii (0.72, 0.80), `palette.accent`, with the same soft
+    /// lighter centre as the MSL (accent × 1.8 fading to accent at the rim).
     func drawDarkFace(in ctx: inout GraphicsContext) {
-        let unit = CharacterPaths.ellipse(center: CGPoint(x: 0, y: -0.08), rx: 0.72, ry: 0.80)
-        ctx.fill(body.path(unit), with: .color(res.accent))
+        let toEllipse = CGAffineTransform(scaleX: 0.72, y: 0.80)
+            .concatenating(CGAffineTransform(translationX: 0, y: -0.08))
+            .concatenating(body.matrix)
+        var c = ctx
+        c.concatenate(toEllipse)
+        c.fill(res.unitDisc, with: .radialGradient(res.darkFaceGradient, center: .zero, startRadius: 0, endRadius: 1))
     }
 
     // MARK: - Limbs (§3.6)
@@ -240,11 +279,17 @@ struct CanvasScene {
     private func drawArm(side: CGFloat, raise: CGFloat, in ctx: inout GraphicsContext) {
         let start = CGPoint(x: side * 0.92, y: -0.20)
         let end = CGPoint(x: side * 1.32, y: -0.20 + 0.90 * raise)
-        ctx.fill(body.path(CharacterPaths.capsule(from: start, to: end, radius: 0.16)), with: bodyShading)
+        let arm = body.path(CharacterPaths.capsule(from: start, to: end, radius: 0.16))
+        ctx.fill(arm, with: bodyShading)
         ctx.fill(body.path(CharacterPaths.circle(center: end, radius: 0.19)), with: bodyShading)
-        // Soft shadow where the arm meets the body (the body is drawn over the inner half).
-        ctx.fill(body.path(CharacterPaths.circle(center: CGPoint(x: side * 0.95, y: -0.20), radius: 0.22)),
-                 with: .color(res.shoulderShadow))
+        // Soft contact shadow where the arm meets the body: a radial fade (α 0.28 → 0 over r 0.22) kept inside the
+        // arm, so nothing spills onto the background; the body is drawn over its inner half.
+        let shoulder = CGPoint(x: side * 0.95, y: -0.20)
+        var shade = ctx
+        shade.clip(to: arm)
+        shade.fill(body.path(CharacterPaths.circle(center: shoulder, radius: 0.22)),
+                   with: .radialGradient(res.shoulderShadowGradient, center: body.point(shoulder),
+                                         startRadius: 0, endRadius: body.length(0.22)))
     }
 
     /// `.legs`: rounded boxes 0.26 × 0.30 at (±0.36, −1.12 + 0.25·leg), corner 0.1, bodyBottom darkened 15 %.

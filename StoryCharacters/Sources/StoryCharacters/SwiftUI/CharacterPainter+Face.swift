@@ -124,28 +124,23 @@ extension CanvasScene {
                                                                 startPoint: head.point(c.x, topY),
                                                                 endPoint: head.point(c.x, topY - shadowH))
 
-        let scleraColor = darkFace ? res.accent : res.sclera
-        let limbalColor = res.limbalRing
-        let pupilColor = res.pupil
-        let highlightColor = res.eyeHighlight
-
-        ctx.drawLayer { layer in
-            layer.clip(to: ellipse)
-            layer.clip(to: band)
-            layer.fill(ellipse, with: .color(scleraColor))
-            if let haloPath, let haloShading {
-                layer.fill(haloPath, with: haloShading)
-            }
-            layer.fill(irisPath, with: irisShading)
-            layer.stroke(irisPath, with: .color(limbalColor), lineWidth: limbalWidth)
-            layer.fill(pupilPath, with: .color(pupilColor))
-            layer.fill(bigHighlight, with: .color(highlightColor))
-            layer.fill(smallHighlight, with: .color(highlightColor))
-            if let sparklePath {
-                layer.fill(sparklePath, with: .color(highlightColor))
-            }
-            layer.fill(lidRect, with: lidShading)
+        // Clip a context copy (no offscreen layer) to the visible region: ellipse ∩ lid band.
+        var eye = ctx
+        eye.clip(to: ellipse)
+        eye.clip(to: band)
+        eye.fill(ellipse, with: .color(darkFace ? res.accent : res.sclera))
+        if let haloPath, let haloShading {
+            eye.fill(haloPath, with: haloShading)
         }
+        eye.fill(irisPath, with: irisShading)
+        eye.stroke(irisPath, with: .color(res.limbalRing), lineWidth: limbalWidth)
+        eye.fill(pupilPath, with: .color(res.pupil))
+        eye.fill(bigHighlight, with: .color(res.eyeHighlight))
+        eye.fill(smallHighlight, with: .color(res.eyeHighlight))
+        if let sparklePath {
+            eye.fill(sparklePath, with: .color(res.eyeHighlight))
+        }
+        eye.fill(lidRect, with: lidShading)
     }
 
     // MARK: - Brows (§3.2)
@@ -199,10 +194,13 @@ extension CanvasScene {
 
         let mouthPath = head.path(CharacterPaths.mouth(halfWidth: w, halfHeight: h, smile: smile, restWidth: bigW).applying(place))
 
+        // Teeth and tongue fade in with the jaw, smoothstep(0.02, 0.05, open) (same gate as the MSL), so a closed
+        // mouth stays a clean lip line.
+        let interiorGate = CharacterPaths.smoothstep(0.02, 0.05, open)
         var upperPath: Path? = nil
         var lowerPath: Path? = nil
         var tonguePath: Path? = nil
-        if open > 0.03 {
+        if interiorGate > 0.01 {
             if upperTeeth > 0.02 {
                 upperPath = head.path(CharacterPaths.teethBand(upper: true, halfWidth: w, halfHeight: h, smile: smile,
                                                                restWidth: bigW, amount: upperTeeth).applying(place))
@@ -212,26 +210,27 @@ extension CanvasScene {
                                                                restWidth: bigW, amount: lowerTeeth).applying(place))
             }
             if tongue > 0.02 {
-                tonguePath = head.path(CharacterPaths.ellipse(center: CGPoint(x: 0, y: -h * (1 - 0.45 * tongue)),
+                // Tongue centre follows the smile warp at x = 0: lift(0) = smile·0.6·W·(0 − 0.33) (the MSL evaluates
+                // the tongue in warped space).
+                let centreLift = -0.33 * smile * 0.6 * bigW
+                tonguePath = head.path(CharacterPaths.ellipse(center: CGPoint(x: 0, y: -h * (1 - 0.45 * tongue) + centreLift),
                                                               rx: 0.55 * w, ry: max(0.002, 0.45 * h * tongue)).applying(place))
             }
         }
 
-        let innerColor = res.mouthInner
-        let teethColor = res.teeth
-        let tongueColor = res.tongue
-        ctx.drawLayer { layer in
-            layer.clip(to: mouthPath)
-            layer.fill(mouthPath, with: .color(innerColor))
-            if let upperPath {
-                layer.fill(upperPath, with: .color(teethColor))
-            }
-            if let lowerPath {
-                layer.fill(lowerPath, with: .color(teethColor))
-            }
-            if let tonguePath {
-                layer.fill(tonguePath, with: .color(tongueColor))
-            }
+        // Clip a context copy (no offscreen layer) to the mouth.
+        var inner = ctx
+        inner.clip(to: mouthPath)
+        inner.fill(mouthPath, with: .color(res.mouthInner))
+        inner.opacity *= Double(interiorGate)
+        if let upperPath {
+            inner.fill(upperPath, with: .color(res.teeth))
+        }
+        if let lowerPath {
+            inner.fill(lowerPath, with: .color(res.teeth))
+        }
+        if let tonguePath {
+            inner.fill(tonguePath, with: .color(res.tongue))
         }
 
         // Lip line fades in with the opening (and press); the stroke bulges with press.

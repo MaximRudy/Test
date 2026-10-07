@@ -285,14 +285,32 @@ public struct GestureClip: Sendable, Equatable {
 // MARK: - GesturePlayer
 
 /// Plays one clip at a time. Interrupting or cancelling cross-fades over 120 ms so nothing pops.
+///
+/// * The incoming clip fades in from its own start (`fadeInStart`), independent of what is fading out.
+/// * The most recently interrupted clip keeps animating while its weight falls from the value it had at the
+///   moment of interruption to 0.
+/// * When a clip is interrupted while another one is still fading out (rapid taps), the older clip's exact
+///   weighted contribution at that instant is folded into a frozen `residue` pose that fades to zero over
+///   120 ms. Any number of interruptions therefore stays continuous, with fixed storage and no allocation.
 struct GesturePlayer: Sendable, Equatable {
     static let crossFade: Float = 0.12
 
     private(set) var current: GestureClip?
     private var currentStart: Float = 0
+    /// Start of the current clip's fade-in; nil = full weight.
+    private var fadeInStart: Float?
+
+    /// Interrupted clip, still evaluated live while it fades out.
     private var previous: GestureClip?
     private var previousStart: Float = 0
-    private var fadeStart: Float = -1
+    private var previousFadeStart: Float = 0
+    /// Weight `previous` had when it was interrupted (its fade-out starts from here).
+    private var previousWeight: Float = 0
+
+    /// Frozen, already weighted delta of older interrupted clips; fades to zero from `residueFadeStart`.
+    private var residue: CharacterPose = .zero
+    private var residueFadeStart: Float = 0
+    private var hasResidue = false
 
     init() {}
 
@@ -300,53 +318,99 @@ struct GesturePlayer: Sendable, Equatable {
     var activeGesture: Gesture? { current?.gesture }
 
     mutating func play(_ clip: GestureClip, at time: Float) {
-        if let cur = current {
-            previous = cur
-            previousStart = currentStart
-            fadeStart = time
-        }
+        let interrupted = current != nil
+        retireCurrent(at: time)
         current = clip
         currentStart = time
+        fadeInStart = interrupted ? time : nil
     }
 
     /// Fades the current clip out over 120 ms.
     mutating func cancel(at time: Float) {
-        guard let cur = current else { return }
-        previous = cur
-        previousStart = currentStart
-        fadeStart = time
+        guard current != nil else { return }
+        retireCurrent(at: time)
         current = nil
+        fadeInStart = nil
     }
 
     mutating func reset() {
         current = nil
+        fadeInStart = nil
         previous = nil
-        fadeStart = -1
+        residue = .zero
+        hasResidue = false
     }
 
     /// Additive delta for `time`; drops finished clips.
     mutating func evaluate(at time: Float) -> CharacterPose {
         var delta = CharacterPose.zero
-        var fadeWeight: Float = 1
-        if let prev = previous {
-            let w = RigCurves.smoothstep((time - fadeStart) / GesturePlayer.crossFade)
-            let u = Float((Double(time - previousStart)) / prev.duration)
-            if w >= 1 || u >= 1 {
-                previous = nil
-                fadeWeight = 1
+        if hasResidue {
+            let w = residueWeight(at: time)
+            if w <= 0 {
+                hasResidue = false
+                residue = .zero
             } else {
-                delta = prev.evaluate(u: u) * (1 - w)
-                fadeWeight = w
+                delta += residue * w
+            }
+        }
+        if let prev = previous {
+            let w = previousFadeWeight(at: time)
+            let u = GesturePlayer.progress(at: time, start: previousStart, duration: prev.duration)
+            if w <= 0 || u >= 1 {
+                previous = nil
+            } else {
+                delta += prev.evaluate(u: u) * w
             }
         }
         if let cur = current {
-            let u = Float((Double(time - currentStart)) / cur.duration)
+            let u = GesturePlayer.progress(at: time, start: currentStart, duration: cur.duration)
             if u >= 1 {
                 current = nil
+                fadeInStart = nil
             } else {
-                delta += cur.evaluate(u: u) * fadeWeight
+                let w = currentWeight(at: time)
+                if w >= 1 { fadeInStart = nil }
+                delta += cur.evaluate(u: u) * w
             }
         }
         return delta
+    }
+
+    // MARK: Internals
+
+    /// Moves the current clip into the fading-out slot at exactly the weight it has at `time`.
+    /// A clip still occupying that slot is frozen into the residue at its exact contribution first.
+    private mutating func retireCurrent(at time: Float) {
+        if let prev = previous {
+            let u = GesturePlayer.progress(at: time, start: previousStart, duration: prev.duration)
+            let contribution = prev.evaluate(u: u) * previousFadeWeight(at: time)
+            let carried = hasResidue ? residue * residueWeight(at: time) : CharacterPose.zero
+            residue = carried + contribution
+            residueFadeStart = time
+            hasResidue = true
+            previous = nil
+        }
+        guard let cur = current else { return }
+        previous = cur
+        previousStart = currentStart
+        previousFadeStart = time
+        previousWeight = currentWeight(at: time)
+    }
+
+    private func currentWeight(at time: Float) -> Float {
+        guard let start = fadeInStart else { return 1 }
+        return RigCurves.smoothstep((time - start) / GesturePlayer.crossFade)
+    }
+
+    private func previousFadeWeight(at time: Float) -> Float {
+        previousWeight * (1 - RigCurves.smoothstep((time - previousFadeStart) / GesturePlayer.crossFade))
+    }
+
+    private func residueWeight(at time: Float) -> Float {
+        1 - RigCurves.smoothstep((time - residueFadeStart) / GesturePlayer.crossFade)
+    }
+
+    private static func progress(at time: Float, start: Float, duration: TimeInterval) -> Float {
+        Float(Double(time - start) / duration)
     }
 }

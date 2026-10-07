@@ -37,6 +37,8 @@ struct StoryView: View {
         NavigationStack(path: $path) {
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 12) {
+                    generateCard
+
                     if !generated.isEmpty {
                         sectionHeader(L10n.yourStories)
                         ForEach(generated) { entry in
@@ -59,6 +61,8 @@ struct StoryView: View {
                         }
                     }
                 }
+                .frame(maxWidth: 640)
+                .frame(maxWidth: .infinity)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
             }
@@ -75,7 +79,7 @@ struct StoryView: View {
                     } label: {
                         Label(L10n.generate, systemImage: "wand.and.stars")
                     }
-                    .accessibilityLabel(L10n.generateTitle)
+                    .accessibilityLabel(L10n.generate)
                 }
             }
             .navigationDestination(for: StoryEntry.self) { entry in
@@ -92,6 +96,27 @@ struct StoryView: View {
                 loadLibraryIfNeeded()
             }
         }
+    }
+
+    /// Prominent entry point to the generator at the top of the list.
+    private var generateCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.generateHint)
+                .font(.system(.subheadline, design: .rounded))
+                .foregroundStyle(.secondary)
+            Button {
+                showsGenerator = true
+            } label: {
+                Label(L10n.generate, systemImage: "wand.and.stars")
+                    .font(.system(.headline, design: .rounded))
+                    .foregroundStyle(AppTheme.onAccent)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+            }
+            .buttonStyle(.glassProminent)
+        }
+        .padding(14)
+        .contentPanel(cornerRadius: 22)
     }
 
     private func storyLink(_ entry: StoryEntry) -> some View {
@@ -141,7 +166,7 @@ struct StoryRow: View {
                     .lineLimit(2)
                 HStack(spacing: 8) {
                     Label(story.narrator.displayName(languageCode: L10n.languageCode), systemImage: "person.wave.2")
-                    Text(story.ageRange)
+                    Text(L10n.ageRange(story.ageRange))
                     Text(story.languageCode.uppercased())
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1)
@@ -156,9 +181,10 @@ struct StoryRow: View {
             Image(systemName: "chevron.right")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
         }
         .padding(14)
-        .glassPanel(cornerRadius: 22)
+        .contentPanel(cornerRadius: 22)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .accessibilityElement(children: .combine)
     }
@@ -176,7 +202,7 @@ struct NarratorAvatar: View {
                 .fill(AppTheme.bodyGradient(for: kind))
             Circle()
                 .strokeBorder(AppTheme.color(palette.glow).opacity(0.7), lineWidth: max(1, size * 0.04))
-            Text(String(kind.englishName.prefix(1)))
+            Text(String(kind.displayName(languageCode: L10n.languageCode).prefix(1)))
                 .font(.system(size: size * 0.42, weight: .heavy, design: .rounded))
                 .foregroundStyle(AppTheme.color(palette.outline))
         }

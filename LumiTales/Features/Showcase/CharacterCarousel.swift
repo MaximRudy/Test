@@ -1,26 +1,34 @@
 import SwiftUI
 import StoryCharacters
 
-/// Horizontal character picker. Every card owns a small live `CharacterView`; only the selected
-/// card animates, the others stay paused on their first frame.
+/// Horizontal character picker: 8 cards, each with a live mini character. A card animates while it is on
+/// screen and pauses as soon as it scrolls out of view (or when the whole showcase is paused).
+///
+/// Selection is reported through `onSelect` rather than a binding so the owner can swap its rig in the
+/// same transaction as the selection change.
 struct CharacterCarousel: View {
-    @Binding var selection: CharacterKind
+    let selection: CharacterKind
     var isPaused: Bool
+    var onSelect: (CharacterKind) -> Void
 
     var body: some View {
         ScrollViewReader { scroller in
             ScrollView(.horizontal) {
                 LazyHStack(spacing: 12) {
                     ForEach(CharacterKind.presentationOrder) { kind in
-                        CharacterCard(kind: kind,
-                                      isSelected: kind == selection,
-                                      isPaused: isPaused || kind != selection)
-                            .id(kind)
-                            .onTapGesture {
-                                withAnimation(.snappy) {
-                                    selection = kind
-                                }
+                        Button {
+                            withAnimation(.snappy) {
+                                onSelect(kind)
                             }
+                        } label: {
+                            CharacterCard(kind: kind,
+                                          isSelected: kind == selection,
+                                          isPaused: isPaused)
+                        }
+                        .buttonStyle(.plain)
+                        .id(kind)
+                        .accessibilityLabel(kind.displayName(languageCode: L10n.languageCode))
+                        .accessibilityAddTraits(kind == selection ? .isSelected : [])
                     }
                 }
                 .padding(.horizontal, 4)
@@ -32,38 +40,50 @@ struct CharacterCarousel: View {
                     scroller.scrollTo(newValue, anchor: .center)
                 }
             }
+            .accessibilityElement(children: .contain)
             .accessibilityLabel(L10n.selectCharacter)
         }
     }
 }
 
 /// One carousel card. The mini rig is created lazily on first appearance and kept for the card's lifetime.
+/// The mini uses the `.balanced` Canvas quality (radial-gradient glow, no blur layer) so several live cards
+/// stay cheap; it runs only while at least 20 % of the card is visible.
 struct CharacterCard: View {
     let kind: CharacterKind
     let isSelected: Bool
+    /// Paused from outside: tab hidden or scene not active.
     let isPaused: Bool
 
     @State private var rig: CharacterRig?
+    /// True while the card is inside the carousel's visible area.
+    @State private var isVisible = false
+
+    @ScaledMetric(relativeTo: .caption) private var scaledCardWidth: CGFloat = 116
 
     var body: some View {
+        let cardWidth = min(max(scaledCardWidth, 116), 176)
+        let miniSize = cardWidth - 24
         VStack(spacing: 6) {
             ZStack {
                 Circle()
                     .fill(AppTheme.glowColor(for: kind).opacity(isSelected ? 0.35 : 0.15))
                     .blur(radius: 10)
                 if let rig {
-                    CharacterView(rig: rig, renderer: .swiftUI, isPaused: isPaused)
+                    CharacterCanvasView(rig: rig, quality: .balanced, isPaused: isPaused || !isVisible)
+                        .accessibilityHidden(true)
                 }
             }
-            .frame(width: 92, height: 92)
+            .frame(width: miniSize, height: miniSize)
 
             Text(kind.displayName(languageCode: L10n.languageCode))
                 .font(.system(.caption, design: .rounded, weight: .semibold))
+                .dynamicTypeSize(...DynamicTypeSize.accessibility2)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
         .padding(10)
-        .frame(width: 116)
+        .frame(width: cardWidth)
         .background {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(isSelected ? AppTheme.accent.opacity(0.18) : Color.white.opacity(0.06))
@@ -75,20 +95,16 @@ struct CharacterCard: View {
         .animation(.snappy, value: isSelected)
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .onAppear {
+            isVisible = true
             if rig == nil {
                 rig = CharacterRig(kind: kind)
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(kind.displayName(languageCode: L10n.languageCode))
-        .accessibilityAddTraits(cardTraits)
-    }
-
-    private var cardTraits: AccessibilityTraits {
-        var traits: AccessibilityTraits = .isButton
-        if isSelected {
-            traits.insert(.isSelected)
+        .onDisappear {
+            isVisible = false
         }
-        return traits
+        .onScrollVisibilityChange(threshold: 0.2) { visible in
+            isVisible = visible
+        }
     }
 }

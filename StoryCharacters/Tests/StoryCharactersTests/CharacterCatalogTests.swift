@@ -17,6 +17,63 @@ final class CharacterCatalogTests: XCTestCase {
         c.x + c.y + c.z
     }
 
+    /// WCAG relative luminance of an sRGB colour.
+    private func relativeLuminance(_ c: SIMD4<Float>) -> Float {
+        func linear(_ v: Float) -> Float {
+            v <= 0.04045 ? v / 12.92 : powf((v + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(c.x) + 0.7152 * linear(c.y) + 0.0722 * linear(c.z)
+    }
+
+    /// WCAG contrast ratio (1 … 21) between two opaque colours.
+    private func contrastRatio(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> Float {
+        let la = relativeLuminance(a)
+        let lb = relativeLuminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
+    /// One number from the CONTRACT §5 per-character notes.
+    private func expectNote(_ kind: CharacterKind, _ keyPath: KeyPath<CharacterDesign, Float>, _ expected: Float,
+                            _ label: String, line: UInt = #line) {
+        let actual = CharacterCatalog.design(for: kind)[keyPath: keyPath]
+        XCTAssertEqual(actual, expected, accuracy: 1e-6, "\(kind) \(label)", line: line)
+    }
+
+    // MARK: - CONTRACT §5 tables
+
+    /// The §5 palette table, one row per kind, columns in table order (bodyTop, bodyBottom, highlight, shadow,
+    /// accent, accent2, iris, pupil, sclera, cheek, glow, mouthInner, tongue, teeth, outline).
+    private static let paletteTable: [CharacterKind: [UInt32]] = [
+        .lumi: [0xFFE066, 0xFFB224, 0xFFF6C2, 0xE08A12, 0x1E1748, 0x7B5CFF, 0x2B1B12, 0x120A06,
+                0xFFFFFF, 0xFFB088, 0xFFD36A, 0x5A2415, 0xFF7E8A, 0xFFFFFF, 0x4A2A10],
+        .spark: [0xFFE873, 0xFFC531, 0xFFF8D0, 0xE79A1A, 0xB9A0EC, 0x8E6FD6, 0x4A2A6E, 0x1D0F33,
+                 0xFFFFFF, 0xFF9FB0, 0xFFD866, 0x6B2E4A, 0xFF8DA1, 0xFFFFFF, 0x6A3E12],
+        .nox: [0xFF6AD5, 0x4C5BFF, 0xFFD0F5, 0x2B1E78, 0x150B33, 0xFFF1B5, 0xB86BFF, 0x1A0A33,
+               0x2A1550, 0xFF7FD8, 0xB06CFF, 0x0E0620, 0xFF6FAE, 0xFFFFFF, 0x2A1550],
+        .lumie: [0xFFE07A, 0xFFB13D, 0xFFF9DC, 0xE68A1E, 0x7A4E2A, 0xDFF5FF, 0x3B2412, 0x140B05,
+                 0xFFFFFF, 0xFFA573, 0xFFC95A, 0x6A2E1A, 0xFF8E8E, 0xFFFFFF, 0x5C3A14],
+        .ember: [0xFFD93D, 0xFF7A1A, 0xFFF3B0, 0xD8450C, 0xFFF0A0, 0xFF4D1C, 0x5A2E0F, 0x1A0A02,
+                 0xFFFFFF, 0xFF8A6A, 0xFF9A3A, 0x6E1E12, 0xFF6B6B, 0xFFFFFF, 0x7A3A10],
+        .drop: [0x7FD8FF, 0x2A8CFF, 0xE6F9FF, 0x1E5BD6, 0xBDEBFF, 0x1266D1, 0xC04B6E, 0x2A0C1A,
+                0xFFFFFF, 0xFF9FC0, 0x6FC3FF, 0x1E3F8A, 0xFF7FA3, 0xFFFFFF, 0x1B4FA8],
+        .puff: [0xFFFFFF, 0xD9E2F5, 0xFFFFFF, 0xA9B6D9, 0xEEF3FF, 0xC6D2F0, 0x4E7BFF, 0x142152,
+                0xFFFFFF, 0xFFA3C2, 0xE0ECFF, 0x3B3F7A, 0xFF86A8, 0xFFFFFF, 0x7F8DB3],
+        .sprout: [0xD9893C, 0x9C5A22, 0xF3C58C, 0x6E3B12, 0x6DBE45, 0x3F9A2E, 0x7A4414, 0x1C0C03,
+                  0xFFFFFF, 0xFF9E7E, 0xB7E07A, 0x5A2A10, 0xFF8080, 0xFFFFFF, 0x4F2A0E],
+    ]
+
+    /// §5 background gradients (top → bottom).
+    private static let backgroundTable: [CharacterKind: (top: UInt32, bottom: UInt32)] = [
+        .lumi: (top: 0x1B1240, bottom: 0x3A1F6E),
+        .spark: (top: 0x2E1A5E, bottom: 0x4A2A8A),
+        .nox: (top: 0x0B0624, bottom: 0x2B1458),
+        .lumie: (top: 0x0E1B2E, bottom: 0x223B5A),
+        .ember: (top: 0x2A0F1E, bottom: 0x5A1F28),
+        .drop: (top: 0x0E2A4A, bottom: 0x1E4E8A),
+        .puff: (top: 0x2A2E55, bottom: 0x4F5A9A),
+        .sprout: (top: 0x13261A, bottom: 0x2E5A32),
+    ]
+
     // MARK: - Presence and keys
 
     func testAllKindsPresentAndKeyed() {
@@ -82,6 +139,38 @@ final class CharacterCatalogTests: XCTestCase {
         for design in CharacterCatalog.all {
             XCTAssertEqual(design.palette.teeth, SIMD4<Float>(hex: 0xFFFFFF), "\(design.kind) teeth")
         }
+    }
+
+    func testPalettesMatchDesignBibleTable() {
+        XCTAssertEqual(Set(CharacterCatalogTests.paletteTable.keys), Set(CharacterKind.allCases))
+        for design in CharacterCatalog.all {
+            guard let row = CharacterCatalogTests.paletteTable[design.kind] else {
+                XCTFail("\(design.kind) is missing from the palette table")
+                continue
+            }
+            let actual = colors(of: design.palette)
+            XCTAssertEqual(row.count, 15, "\(design.kind) palette row must have 15 columns")
+            XCTAssertEqual(actual.count, row.count)
+            for (column, hex) in row.enumerated() where column < actual.count {
+                XCTAssertEqual(actual[column], SIMD4<Float>(hex: hex), "\(design.kind) palette column \(column)")
+            }
+        }
+    }
+
+    func testDarkFaceEyesAndMouthInteriorRead() {
+        var checked = 0
+        for design in CharacterCatalog.all where design.features.contains(.darkFace) {
+            let palette = design.palette
+            // The glowing irises sit directly on the dark face (accent); tongue and teeth sit on the mouth fill.
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.iris, palette.accent), 3,
+                                        "\(design.kind) irises vanish on the dark face")
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.tongue, palette.mouthInner), 2.5,
+                                        "\(design.kind) tongue vanishes inside the mouth")
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.teeth, palette.mouthInner), 2.5,
+                                        "\(design.kind) teeth vanish inside the mouth")
+            checked += 1
+        }
+        XCTAssertEqual(checked, 1, "exactly one dark-faced design (Nox)")
     }
 
     // MARK: - Body shapes and features (§5 table)
@@ -199,6 +288,123 @@ final class CharacterCatalogTests: XCTestCase {
         XCTAssertEqual(CharacterCatalog.sprout.face.mouthY, -0.36, accuracy: 1e-6)
     }
 
+    /// Every number named in the §5 per-character notes.
+    func testPerCharacterNotesMatchDesignBible() {
+        // Lumi
+        expectNote(.lumi, \.face.eyeOffsetX, 0.30, "eyeOffsetX")
+        expectNote(.lumi, \.face.eyeY, 0.05, "eyeY")
+        expectNote(.lumi, \.face.eyeRadiusX, 0.17, "eyeRadiusX")
+        expectNote(.lumi, \.face.eyeRadiusY, 0.20, "eyeRadiusY")
+        expectNote(.lumi, \.face.mouthY, -0.28, "mouthY")
+        expectNote(.lumi, \.face.mouthWidth, 0.18, "mouthWidth")
+        expectNote(.lumi, \.face.cheekX, 0.40, "cheekX")
+        expectNote(.lumi, \.frame.radiusScale, 0.50, "radiusScale")
+        expectNote(.lumi, \.frame.centerOffsetY, -0.05, "centerOffsetY")
+        expectNote(.lumi, \.idle.floatAmplitude, 0.03, "floatAmplitude")
+        expectNote(.lumi, \.personality.energy, 0.5, "energy")
+        expectNote(.lumi, \.personality.curiosity, 0.7, "curiosity")
+        expectNote(.lumi, \.voice.pitch, 1.15, "pitch")
+        expectNote(.lumi, \.voice.rate, 0.95, "rate")
+        // Spark
+        expectNote(.spark, \.face.eyeOffsetX, 0.36, "eyeOffsetX")
+        expectNote(.spark, \.face.eyeY, -0.02, "eyeY")
+        expectNote(.spark, \.face.eyeRadiusX, 0.21, "eyeRadiusX")
+        expectNote(.spark, \.face.eyeRadiusY, 0.25, "eyeRadiusY")
+        expectNote(.spark, \.face.irisRadius, 0.165, "irisRadius")
+        expectNote(.spark, \.face.mouthY, -0.42, "mouthY")
+        expectNote(.spark, \.face.mouthWidth, 0.16, "mouthWidth")
+        expectNote(.spark, \.frame.radiusScale, 0.56, "radiusScale")
+        expectNote(.spark, \.personality.energy, 0.7, "energy")
+        expectNote(.spark, \.personality.curiosity, 0.9, "curiosity")
+        expectNote(.spark, \.personality.playfulness, 0.7, "playfulness")
+        expectNote(.spark, \.voice.pitch, 1.35, "pitch")
+        expectNote(.spark, \.voice.rate, 1.0, "rate")
+        // Nox
+        expectNote(.nox, \.face.eyeRadiusX, 0.26, "eyeRadiusX")
+        expectNote(.nox, \.face.eyeRadiusY, 0.28, "eyeRadiusY")
+        expectNote(.nox, \.face.irisRadius, 0.22, "irisRadius")
+        expectNote(.nox, \.face.pupilRadius, 0.11, "pupilRadius")
+        expectNote(.nox, \.face.eyeOffsetX, 0.36, "eyeOffsetX")
+        expectNote(.nox, \.face.eyeY, -0.05, "eyeY")
+        expectNote(.nox, \.face.mouthY, -0.45, "mouthY")
+        expectNote(.nox, \.face.mouthWidth, 0.12, "mouthWidth")
+        expectNote(.nox, \.frame.radiusScale, 0.56, "radiusScale")
+        expectNote(.nox, \.frame.centerOffsetY, -0.1, "centerOffsetY")
+        expectNote(.nox, \.idle.floatAmplitude, 0.05, "floatAmplitude")
+        expectNote(.nox, \.sparkleRate, 0.6, "sparkleRate")
+        expectNote(.nox, \.personality.energy, 0.35, "energy")
+        expectNote(.nox, \.personality.shyness, 0.5, "shyness")
+        expectNote(.nox, \.voice.pitch, 1.05, "pitch")
+        expectNote(.nox, \.voice.rate, 0.9, "rate")
+        // Lumie
+        expectNote(.lumie, \.frame.radiusScale, 0.40, "radiusScale")
+        expectNote(.lumie, \.frame.centerOffsetY, 0.25, "centerOffsetY")
+        expectNote(.lumie, \.face.eyeRadiusX, 0.19, "eyeRadiusX")
+        expectNote(.lumie, \.face.eyeRadiusY, 0.22, "eyeRadiusY")
+        expectNote(.lumie, \.face.eyeY, 0.0, "eyeY")
+        expectNote(.lumie, \.face.mouthY, -0.38, "mouthY")
+        expectNote(.lumie, \.idle.flickerRate, 1.2, "flickerRate")
+        expectNote(.lumie, \.sparkleRate, 0.7, "sparkleRate")
+        expectNote(.lumie, \.idle.floatAmplitude, 0.04, "floatAmplitude")
+        expectNote(.lumie, \.personality.energy, 0.4, "energy")
+        expectNote(.lumie, \.personality.shyness, 0.3, "shyness")
+        expectNote(.lumie, \.voice.pitch, 1.25, "pitch")
+        expectNote(.lumie, \.voice.rate, 0.9, "rate")
+        // Ember
+        expectNote(.ember, \.face.eyeRadiusX, 0.20, "eyeRadiusX")
+        expectNote(.ember, \.face.eyeRadiusY, 0.23, "eyeRadiusY")
+        expectNote(.ember, \.face.eyeY, 0.0, "eyeY")
+        expectNote(.ember, \.face.mouthY, -0.38, "mouthY")
+        expectNote(.ember, \.face.mouthWidth, 0.24, "mouthWidth")
+        expectNote(.ember, \.idle.flickerRate, 1.6, "flickerRate")
+        expectNote(.ember, \.personality.energy, 0.9, "energy")
+        expectNote(.ember, \.personality.playfulness, 0.8, "playfulness")
+        expectNote(.ember, \.voice.pitch, 1.2, "pitch")
+        expectNote(.ember, \.voice.rate, 1.1, "rate")
+        // Drop
+        expectNote(.drop, \.face.eyeRadiusX, 0.21, "eyeRadiusX")
+        expectNote(.drop, \.face.eyeRadiusY, 0.24, "eyeRadiusY")
+        expectNote(.drop, \.face.mouthWidth, 0.22, "mouthWidth")
+        expectNote(.drop, \.idle.wobbleAmplitude, 0.05, "wobbleAmplitude")
+        expectNote(.drop, \.personality.energy, 0.6, "energy")
+        expectNote(.drop, \.personality.playfulness, 0.7, "playfulness")
+        expectNote(.drop, \.voice.pitch, 1.3, "pitch")
+        expectNote(.drop, \.voice.rate, 1.0, "rate")
+        // Puff
+        expectNote(.puff, \.face.eyeOffsetX, 0.42, "eyeOffsetX")
+        expectNote(.puff, \.face.eyeY, 0.02, "eyeY")
+        expectNote(.puff, \.face.eyeRadiusX, 0.20, "eyeRadiusX")
+        expectNote(.puff, \.face.eyeRadiusY, 0.23, "eyeRadiusY")
+        expectNote(.puff, \.idle.floatAmplitude, 0.05, "floatAmplitude")
+        expectNote(.puff, \.idle.floatFrequency, 0.6, "floatFrequency")
+        expectNote(.puff, \.personality.energy, 0.45, "energy")
+        expectNote(.puff, \.personality.curiosity, 0.6, "curiosity")
+        expectNote(.puff, \.voice.pitch, 1.4, "pitch")
+        expectNote(.puff, \.voice.rate, 0.95, "rate")
+        // Sprout
+        expectNote(.sprout, \.face.eyeY, 0.02, "eyeY")
+        expectNote(.sprout, \.face.eyeRadiusX, 0.21, "eyeRadiusX")
+        expectNote(.sprout, \.face.eyeRadiusY, 0.24, "eyeRadiusY")
+        expectNote(.sprout, \.face.mouthY, -0.36, "mouthY")
+        expectNote(.sprout, \.personality.energy, 0.4, "energy")
+        expectNote(.sprout, \.personality.shyness, 0.4, "shyness")
+        expectNote(.sprout, \.voice.pitch, 1.1, "pitch")
+        expectNote(.sprout, \.voice.rate, 0.9, "rate")
+    }
+
+    /// Lumi's brows are centred right under the star's upper notches (inner vertices at radius 0.52, 54°:
+    /// (±0.306, 0.4207)). Even the surprised raise (§6: 0.9 → +0.108, §3.2) must keep them inside the silhouette,
+    /// and at rest they must clear the eyes.
+    func testLumiBrowsStayInsideTheStar() {
+        let face = CharacterCatalog.lumi.face
+        let notchY: Float = 0.4207
+        let surprisedRaise: Float = 0.9
+        let raisedBrowTop = face.browY + 0.12 * surprisedRaise + face.browThickness / 2
+        XCTAssertLessThanOrEqual(raisedBrowTop, notchY, "Lumi's raised brows poke out through the star's upper notches")
+        XCTAssertGreaterThan(face.browY - face.browThickness / 2, face.eyeY + face.eyeRadiusY,
+                             "Lumi's brows touch the eyes at rest")
+    }
+
     // MARK: - Idle, personality, voice, text
 
     func testIdleStylesAreSane() {
@@ -240,9 +446,10 @@ final class CharacterCatalogTests: XCTestCase {
             XCTAssertLessThanOrEqual(design.glowStrength, 2, "\(kind) glow")
             XCTAssertGreaterThanOrEqual(design.sparkleRate, 0, "\(kind) sparkleRate")
             XCTAssertLessThanOrEqual(design.sparkleRate, 1, "\(kind) sparkleRate")
-            for identifier in design.voice.preferredVoiceIdentifiers {
-                XCTAssertFalse(identifier.isEmpty, "\(kind) has an empty voice identifier")
-            }
+            // No pinned voices: a fixed (single-language) list would override the per-utterance language choice
+            // and the premium/enhanced preference of SpeechSynthesisDriver.
+            XCTAssertTrue(design.voice.preferredVoiceIdentifiers.isEmpty,
+                          "\(kind) must not pin voices; the driver picks the best voice for each utterance's language")
         }
         // Contract-specified voices and personalities.
         XCTAssertEqual(CharacterCatalog.lumi.voice.pitch, 1.15, accuracy: 1e-6)
@@ -253,7 +460,6 @@ final class CharacterCatalogTests: XCTestCase {
         XCTAssertEqual(CharacterCatalog.ember.voice.rate, 1.1, accuracy: 1e-6)
         XCTAssertEqual(CharacterCatalog.puff.voice.pitch, 1.4, accuracy: 1e-6)
         XCTAssertEqual(CharacterCatalog.sprout.voice.rate, 0.9, accuracy: 1e-6)
-        XCTAssertTrue(CharacterCatalog.lumi.voice.preferredVoiceIdentifiers.contains("com.apple.voice.compact.ru-RU.Milena"))
     }
 
     func testTaglinesAreBilingual() {
@@ -291,7 +497,15 @@ final class CharacterCatalogTests: XCTestCase {
                 XCTAssertFalse(same, "\(kinds[i]) and \(kinds[j]) share a background gradient")
             }
         }
-        XCTAssertEqual(CharacterCatalog.backgroundColors(for: .lumi).top, SIMD4<Float>(hex: 0x1B1240))
-        XCTAssertEqual(CharacterCatalog.backgroundColors(for: .sprout).bottom, SIMD4<Float>(hex: 0x2E5A32))
+        XCTAssertEqual(Set(CharacterCatalogTests.backgroundTable.keys), Set(CharacterKind.allCases))
+        for kind in CharacterKind.allCases {
+            guard let expected = CharacterCatalogTests.backgroundTable[kind] else {
+                XCTFail("\(kind) is missing from the background table")
+                continue
+            }
+            let gradient = CharacterCatalog.backgroundColors(for: kind)
+            XCTAssertEqual(gradient.top, SIMD4<Float>(hex: expected.top), "\(kind) background top")
+            XCTAssertEqual(gradient.bottom, SIMD4<Float>(hex: expected.bottom), "\(kind) background bottom")
+        }
     }
 }

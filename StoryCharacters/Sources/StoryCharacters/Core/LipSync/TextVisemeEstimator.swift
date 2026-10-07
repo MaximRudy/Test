@@ -6,14 +6,15 @@ import Foundation
 /// Russian: "мама" → pp aa pp aa, "привет" → pp rr ih ff e dd, "жили-были" → ch ih dd ih sil pp ih dd ih.
 /// Iotated vowels (я ю ё е) get a short `ih` glide at a word start, after a vowel or after ь/ъ; the soft
 /// sign lengthens the preceding consonant (palatalisation), the hard sign separates. Doubled letters merge.
-/// English: digraphs (th sh ch ng qu ph ck wh and the common vowel pairs), soft `c`, silent final `e`.
+/// English: digraphs (th sh ch ng qu ph ck wh and the common vowel pairs), soft `c`, silent final `e`, silent
+/// gh / initial kn, gn, wr / final mb, rounded "ou" in you/could/soup. Cyrillic stress accents are ignored.
 public enum TextVisemeEstimator {
 
     // MARK: Public API
 
     /// Viseme keyframes for one word. Times are relative to the word start and use `Viseme.nominalDuration`.
     public static func visemes(forWord word: String, languageCode: String) -> [VisemeKeyframe] {
-        let normalized = word.lowercased().precomposedStringWithCanonicalMapping
+        let normalized = removingCyrillicStressMarks(word.lowercased()).precomposedStringWithCanonicalMapping
         let chars = Array(normalized)
         guard !chars.isEmpty else { return [] }
         var builder = KeyframeBuilder()
@@ -112,6 +113,43 @@ public enum TextVisemeEstimator {
             }
         }
         return false
+    }
+
+    /// Number of articulated characters (letters and digits; combining marks such as stress accents excluded).
+    /// Used by the TTS driver's seconds-per-character estimate.
+    static func articulatedLength(of word: String) -> Int {
+        var count = 0
+        for scalar in word.unicodeScalars {
+            let v = scalar.value
+            if v >= 0x0300 && v <= 0x036F { continue }
+            if scalar.properties.isAlphabetic || (v >= 0x30 && v <= 0x39) { count += 1 }
+        }
+        return count
+    }
+
+    /// Removes acute/grave stress accents placed on Cyrillic letters ("жи́ли" → "жили", "ѐ" → "е") so the stressed
+    /// vowel keeps its viseme. Breve and diaeresis survive (they form й and ё); accents on Latin letters are kept.
+    static func removingCyrillicStressMarks(_ text: String) -> String {
+        var needsWork = false
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x0300, 0x0301, 0x0400, 0x040D, 0x0450, 0x045D:
+                needsWork = true
+            default:
+                break
+            }
+            if needsWork { break }
+        }
+        guard needsWork else { return text }
+        var kept = String.UnicodeScalarView()
+        var previousIsCyrillic = false
+        for scalar in text.decomposedStringWithCanonicalMapping.unicodeScalars {
+            let v = scalar.value
+            if (v == 0x0300 || v == 0x0301) && previousIsCyrillic { continue }
+            kept.append(scalar)
+            previousIsCyrillic = v >= 0x0400 && v <= 0x052F
+        }
+        return String(kept).precomposedStringWithCanonicalMapping
     }
 
     static func containsLatin(_ text: String) -> Bool {
@@ -233,6 +271,11 @@ public enum TextVisemeEstimator {
                 i += 3
                 continue
             }
+            // Silent letters and position-dependent spellings.
+            if let consumed = emitEnglishSpecial(chars, at: i, into: &b) {
+                i += consumed
+                continue
+            }
             // Consonant digraphs.
             if let next = next, let consumed = emitEnglishDigraph(c, next, into: &b) {
                 i += consumed
@@ -266,6 +309,69 @@ public enum TextVisemeEstimator {
             i += 1
         }
     }
+
+    /// Silent letters (gh, initial kn/gn/wr, final mb) and the rounded "ou" of you/could/soup. Returns the number of
+    /// characters consumed, or nil when no rule applies at `i`.
+    private static func emitEnglishSpecial(_ chars: [Character], at i: Int, into b: inout KeyframeBuilder) -> Int? {
+        let n = chars.count
+        guard i + 1 < n else { return nil }
+        let c = chars[i]
+        let next = chars[i + 1]
+        switch (c, next) {
+        case ("k", "n"), ("g", "n"):
+            // knight, know, gnome: the first letter is silent at a word start.
+            if i == 0 { return 1 }
+        case ("w", "r"):
+            // write, wrong: silent w at a word start.
+            if i == 0 { return 1 }
+        case ("m", "b"):
+            // lamb, climb: final b is silent.
+            if i + 2 == n {
+                b.add(.pp, scale: 1.1)
+                return 2
+            }
+        case ("g", "h"):
+            if i == 0 {
+                // ghost: hard g.
+                b.add(.kk)
+                return 2
+            }
+            // laugh, enough, tough: final gh after ou/au sounds like f (though, through... stay silent).
+            if i + 2 == n, i >= 2, chars[i - 1] == "u", chars[i - 2] == "o" || chars[i - 2] == "a",
+               !silentFinalGhWords.contains(String(chars)) {
+                b.add(.ff)
+            }
+            // night, light, thought, high: silent.
+            return 2
+        case ("o", "u"):
+            let next2: Character? = i + 2 < n ? chars[i + 2] : nil
+            let next3: Character? = i + 3 < n ? chars[i + 3] : nil
+            let next4: Character? = i + 4 < n ? chars[i + 4] : nil
+            // you, your, yours, youth: rounded throughout.
+            if i == 1, chars[0] == "y", youTails.contains(String(chars[3...])) {
+                b.add(.ou, scale: 1.3)
+                return 2
+            }
+            // could, would, should; soup, group.
+            if (next2 == "l" && next3 == "d") || next2 == "p" {
+                b.add(.ou, scale: 1.2)
+                return 2
+            }
+            // thought, bought, brought: open rounded vowel.
+            if next2 == "g" && next3 == "h" && next4 == "t" {
+                b.add(.oh, scale: 1.2)
+                return 2
+            }
+        default:
+            break
+        }
+        return nil
+    }
+
+    /// Words whose final "gh" after "ou"/"au" is silent.
+    private static let silentFinalGhWords: Set<String> = ["though", "although", "through", "thorough", "borough", "dough", "bough", "plough", "furlough"]
+    /// What may follow "you" for the whole word to keep the rounded vowel.
+    private static let youTails: Set<String> = ["", "r", "rs", "th", "ths", "rself", "rselves"]
 
     /// Emits a two-letter digraph and returns the number of characters consumed, or nil if `c, next` is not one.
     private static func emitEnglishDigraph(_ c: Character, _ next: Character, into b: inout KeyframeBuilder) -> Int? {

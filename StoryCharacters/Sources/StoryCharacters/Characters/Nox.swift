@@ -7,8 +7,12 @@ extension CharacterCatalog {
     /// eyes and a crescent moon on the forehead. Mysterious and gentle.
     ///
     /// Layout notes: the face lives inside the dark inner ellipse (0, −0.08) × (0.72, 0.80). The eyes are the
-    /// largest in the catalog (iris 85 % of the eye) and glow; the mouth is a tiny pink dot low on the face;
-    /// pink cheeks sit beside it. Brows are drawn in the dark outline colour and stay nearly invisible on purpose.
+    /// largest in the catalog (iris 85 % of the eye) and glow; the mouth is small and low on the face, with
+    /// pink cheeks beside it.
+    ///
+    /// The palette is the CONTRACT §5 nox row verbatim. Renderers draw brows, the lip line and the lid shade in
+    /// `outline` and fill the mouth with `mouthInner` over the dark face (`accent`); with the §5 values that ink
+    /// is very low-contrast, which is the subject of a pending contract change request for the nox row.
     /// Idle: slow float, stardust trail. Signature (Core): moon mark brightens with arousal; eyes dim when `.sleepy`.
     public static let nox: CharacterDesign = CharacterDesign(
         kind: .nox,
@@ -28,7 +32,7 @@ extension CharacterCatalog {
         idle: IdleStyle(floatAmplitude: 0.05, floatFrequency: 0.45, wobbleAmplitude: 0.03, wobbleFrequency: 0.3,
                         flickerRate: 0, breathDepth: 0.8),
         personality: Personality(energy: 0.35, shyness: 0.5, curiosity: 0.5, playfulness: 0.3),
-        voice: VoiceStyle(pitch: 1.05, rate: 0.9, preferredVoiceIdentifiers: CharacterCatalog.russianVoiceIdentifiers),
+        voice: VoiceStyle(pitch: 1.05, rate: 0.9),
         glowStrength: 1.3,
         sparkleRate: 0.6,
         tagline: [

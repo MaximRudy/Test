@@ -14,23 +14,8 @@ struct PromptOption: Hashable, Identifiable {
     }
 }
 
-/// "Generate a tale" sheet: fills a `StoryPrompt` and runs `TemplateStoryGenerator` asynchronously.
-@MainActor
-struct GeneratorView: View {
-    var onGenerated: (Story) -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scenePhase
-
-    @State private var heroName = ""
-    @State private var setting: PromptOption = GeneratorView.settings[0]
-    @State private var theme: PromptOption = GeneratorView.themes[0]
-    @State private var narrator: CharacterKind = .lumi
-    @State private var language: String = L10n.languageCode
-    @State private var isGenerating = false
-    @State private var errorMessage: String?
-    @State private var previewRig = CharacterRig(kind: .lumi)
-
+/// Picker presets for the generator. Kept outside the view so they are plain nonisolated constants.
+enum StoryPresets {
     static let settings: [PromptOption] = [
         PromptOption(ru: "волшебный лес", en: "an enchanted forest"),
         PromptOption(ru: "звёздное небо", en: "the starry sky"),
@@ -48,6 +33,26 @@ struct GeneratorView: View {
         PromptOption(ru: "мечта", en: "a dream"),
         PromptOption(ru: "честность", en: "honesty")
     ]
+}
+
+/// "Generate a tale" sheet: fills a `StoryPrompt` and runs `TemplateStoryGenerator` asynchronously.
+@MainActor
+struct GeneratorView: View {
+    var onGenerated: (Story) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var heroName = ""
+    @State private var setting: PromptOption = StoryPresets.settings[0]
+    @State private var theme: PromptOption = StoryPresets.themes[0]
+    @State private var narrator: CharacterKind = .lumi
+    @State private var language: String = L10n.languageCode
+    @State private var isGenerating = false
+    @State private var errorMessage: String?
+    /// Live preview of the chosen narrator. Created on first appearance (not in the initializer, which SwiftUI
+    /// re-runs whenever the presenting view updates) and replaced when the narrator changes.
+    @State private var previewRig: CharacterRig?
 
     var body: some View {
         NavigationStack {
@@ -55,10 +60,14 @@ struct GeneratorView: View {
                 Section {
                     HStack {
                         Spacer()
-                        CharacterView(rig: previewRig, renderer: .swiftUI, isPaused: scenePhase != .active)
-                            .id(ObjectIdentifier(previewRig))
-                            .frame(width: 180, height: 180)
-                            .accessibilityHidden(true)
+                        ZStack {
+                            if let previewRig {
+                                CharacterView(rig: previewRig, renderer: .swiftUI, isPaused: scenePhase != .active)
+                                    .id(ObjectIdentifier(previewRig))
+                            }
+                        }
+                        .frame(width: 180, height: 180)
+                        .accessibilityHidden(true)
                         Spacer()
                     }
                     .listRowBackground(Color.clear)
@@ -72,12 +81,12 @@ struct GeneratorView: View {
 
                 Section(L10n.storySettings) {
                     Picker(L10n.setting, selection: $setting) {
-                        ForEach(GeneratorView.settings) { option in
+                        ForEach(StoryPresets.settings) { option in
                             Text(option.text(language)).tag(option)
                         }
                     }
                     Picker(L10n.theme, selection: $theme) {
-                        ForEach(GeneratorView.themes) { option in
+                        ForEach(StoryPresets.themes) { option in
                             Text(option.text(language)).tag(option)
                         }
                     }
@@ -115,6 +124,8 @@ struct GeneratorView: View {
                             Spacer()
                         }
                         .font(.system(.headline, design: .rounded))
+                        .foregroundStyle(AppTheme.onAccent)
+                        .tint(AppTheme.onAccent)
                         .padding(.vertical, 6)
                     }
                     .buttonStyle(.glassProminent)
@@ -135,6 +146,11 @@ struct GeneratorView: View {
                         dismiss()
                     }
                     .disabled(isGenerating)
+                }
+            }
+            .onAppear {
+                if previewRig == nil {
+                    previewRig = CharacterRig(kind: narrator)
                 }
             }
             .onChange(of: narrator) { _, kind in

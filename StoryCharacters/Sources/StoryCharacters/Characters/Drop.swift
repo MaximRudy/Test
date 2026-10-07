@@ -27,7 +27,7 @@ extension CharacterCatalog {
         idle: IdleStyle(floatAmplitude: 0.012, floatFrequency: 1.0, wobbleAmplitude: 0.05, wobbleFrequency: 0.9,
                         flickerRate: 0, breathDepth: 1),
         personality: Personality(energy: 0.6, shyness: 0.15, curiosity: 0.55, playfulness: 0.7),
-        voice: VoiceStyle(pitch: 1.3, rate: 1.0, preferredVoiceIdentifiers: CharacterCatalog.russianVoiceIdentifiers),
+        voice: VoiceStyle(pitch: 1.3, rate: 1.0),
         glowStrength: 0.9,
         sparkleRate: 0.35,
         tagline: [

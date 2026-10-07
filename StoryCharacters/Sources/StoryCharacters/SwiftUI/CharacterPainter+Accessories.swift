@@ -10,48 +10,45 @@ extension CanvasScene {
 
     // MARK: - Robe / hood (Lumi)
 
-    /// Robe behind the body: teardrop r 1.28 at (0, −0.25) with the peak at (0.08·sin(wiggle), 1.38), minus the
-    /// face opening (even-odd). `.starPattern` sprinkles tiny stars on it.
+    /// Robe behind the body: teardrop r 1.28 at (0, −0.25) with the peak at (0.08·sin(wiggle), 1.38). The face
+    /// opening (ellipse (0, 0.05), radii (0.80, 0.84)) shows the hood interior — the robe colour at 45 %, as the MSL
+    /// `robeColor(…, interior)` — and the body is drawn on top of it through a clip to the opening (see `draw(in:)`).
+    /// `.starPattern` sprinkles the static grid star field on the robe outside the opening (MSL: `robeCov·(1 − opening)`).
     func drawRobeBack(in ctx: inout GraphicsContext) {
-        let robeUnit = CharacterPaths.robe(peakX: 0.08 * sin(wiggle))
-        var withOpening = robeUnit
-        withOpening.addPath(res.robeOpening)
-        let clipPath = body.path(withOpening)
-        let robePath = body.path(robeUnit)
-        let shading = robeShading
-        let stars: Path? = features.contains(.starPattern) ? body.path(res.robeStarField) : nil
-        let starColor = res.robeStar
-        ctx.drawLayer { layer in
-            layer.clip(to: clipPath, style: FillStyle(eoFill: true))
-            layer.fill(robePath, with: shading)
-            if let stars {
-                layer.fill(stars, with: .color(starColor))
-            }
+        let robePath = body.path(CharacterPaths.robe(peakX: 0.08 * sin(wiggle)))
+        let openingPath = body.path(res.robeOpening)
+        ctx.fill(robePath, with: robeShading)
+        ctx.fill(openingPath, with: robeInteriorShading)
+        if features.contains(.starPattern) {
+            var stars = ctx
+            stars.clip(to: robePath)
+            stars.clip(to: openingPath, options: .inverse)
+            stars.fill(body.path(res.robeStarField), with: .color(res.robeStar))
         }
     }
 
-    /// Robe front (collar below ≈ −0.55) drawn over the body so the star peeks out of the opening.
+    /// Robe front (collar below y = −0.55 + 0.05·x²) drawn over the body so the star peeks out of the opening; the
+    /// star field continues on it (MSL: `robeStars·front`).
     func drawRobeFront(in ctx: inout GraphicsContext) {
         let robePath = body.path(CharacterPaths.robe(peakX: 0.08 * sin(wiggle)))
-        let mask = body.path(res.robeFrontMask)
-        let shading = robeShading
-        let stars: Path? = features.contains(.starPattern) ? body.path(res.robeStarField) : nil
-        let starColor = res.robeStar
-        let trim = res.accent2Dark
-        let trimWidth = body.length(0.03)
-        ctx.drawLayer { layer in
-            layer.clip(to: mask)
-            layer.fill(robePath, with: shading)
-            if let stars {
-                layer.fill(stars, with: .color(starColor))
-            }
-            // Thin trim along the robe edge for definition.
-            layer.stroke(robePath, with: .color(trim), lineWidth: trimWidth)
+        var c = ctx
+        c.clip(to: body.path(res.robeFrontMask))
+        c.fill(robePath, with: robeShading)
+        if features.contains(.starPattern) {
+            var stars = c
+            stars.clip(to: robePath)
+            stars.fill(body.path(res.robeStarField), with: .color(res.robeStar))
         }
+        // Thin trim along the robe edge for definition.
+        c.stroke(robePath, with: .color(res.accent2Dark), lineWidth: body.length(0.03))
     }
 
     private var robeShading: GraphicsContext.Shading {
         .linearGradient(res.robeGradient, startPoint: body.point(0, 1.38), endPoint: body.point(0, -1.55))
+    }
+
+    private var robeInteriorShading: GraphicsContext.Shading {
+        .linearGradient(res.robeInteriorGradient, startPoint: body.point(0, 1.38), endPoint: body.point(0, -1.55))
     }
 
     // MARK: - Book & wand (Lumi)
@@ -91,9 +88,14 @@ extension CanvasScene {
 
     // MARK: - Brain (Spark)
 
+    /// Six-circle brain around (0, 0.62), radius 0.30·k with k = 1 + 0.08·accessory, pulsing accent2 halo — shaded like
+    /// the MSL `drawBrain`: a vertical shade towards accent2 (brain-frame y: accent at +0.18·k → 40 % accent2 at
+    /// −0.42·k), the accent2 grooves clipped to the brain, then rim darkening towards accent2·0.8 within 0.04 of the
+    /// edge (two bands bounded by the inset brain paths).
     func drawBrain(in ctx: inout GraphicsContext) {
         let accessory = clamp01(pose.body.accessory)
-        let r: CGFloat = 0.30 * (1 + 0.08 * accessory)
+        let k: CGFloat = 1 + 0.08 * accessory
+        let r: CGFloat = 0.30 * k
         let c = CGPoint(x: 0, y: 0.62)
         if accessory > 0.02 {
             let saved = ctx.opacity
@@ -102,9 +104,20 @@ extension CanvasScene {
                      with: .radialGradient(res.accent2GlowGradient, center: body.point(c), startRadius: 0, endRadius: body.length(r * 1.7)))
             ctx.opacity = saved
         }
-        ctx.fill(body.path(CharacterPaths.brain(center: c, radius: r)), with: .color(res.accent))
-        ctx.stroke(body.path(CharacterPaths.brainGrooves(center: c, radius: r)), with: .color(res.accent2),
-                   style: StrokeStyle(lineWidth: body.length(0.025), lineCap: .round, lineJoin: .round))
+        let brainPath = body.path(CharacterPaths.brain(center: c, radius: r))
+        ctx.fill(brainPath, with: .linearGradient(res.brainGradient,
+                                                  startPoint: body.point(c.x, c.y + 0.18 * k),
+                                                  endPoint: body.point(c.x, c.y - 0.42 * k)))
+        var inside = ctx
+        inside.clip(to: brainPath)
+        inside.stroke(body.path(CharacterPaths.brainGrooves(center: c, radius: r)), with: .color(res.accent2),
+                      style: StrokeStyle(lineWidth: body.length(0.025), lineCap: .round, lineJoin: .round))
+        var rimOuter = inside
+        rimOuter.clip(to: body.path(CharacterPaths.brain(center: c, radius: r, inset: 0.04)), options: .inverse)
+        rimOuter.fill(brainPath, with: .color(res.brainRimOuter))
+        var rimInner = inside
+        rimInner.clip(to: body.path(CharacterPaths.brain(center: c, radius: r, inset: 0.015)), options: .inverse)
+        rimInner.fill(brainPath, with: .color(res.brainRimInner))
     }
 
     // MARK: - Moon mark (Nox)
@@ -154,15 +167,14 @@ extension CanvasScene {
     func drawCapAndLeaves(in ctx: inout GraphicsContext) {
         let accessory = clamp01(pose.body.accessory)
         let capPath = body.path(res.capMask)
-        let silhouette = bodyPath
-        let capColor = res.accent
-        let edgeColor = res.accentDark
-        let edgeWidth = body.length(0.03)
-        ctx.drawLayer { layer in
-            layer.clip(to: silhouette)
-            layer.fill(capPath, with: .color(capColor))
-            layer.stroke(capPath, with: .color(edgeColor), lineWidth: edgeWidth)
-        }
+        var c = ctx
+        c.clip(to: bodyPath)
+        // Faint shadow under the scalloped edge (MSL: shadow α 0.25 fading over 0.07): two stacked fills of the
+        // cap shape shifted down 0.07 (α 0.06) and 0.035 (α 0.15), ≈ 0.20 right under the edge.
+        c.fill(body.path(res.capShadowFarPath), with: .color(res.capShadowFar))
+        c.fill(body.path(res.capShadowNearPath), with: .color(res.capShadowNear))
+        c.fill(capPath, with: .color(res.accent))
+        c.stroke(capPath, with: .color(res.accentDark), lineWidth: body.length(0.03))
         // Stem.
         ctx.fill(body.path(CharacterPaths.capsule(from: CGPoint(x: 0, y: 0.90), to: CGPoint(x: 0.03, y: 1.10), radius: 0.035)),
                  with: .color(res.accentDark))

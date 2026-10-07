@@ -76,46 +76,53 @@ extension CanvasScene {
         drawText(glyph, at: p, size: radius * 0.55, alpha: Double(alpha), in: &ctx)
     }
 
+    /// Point size the glyphs are resolved at; they are scaled to the requested size through the context transform,
+    /// so the font never changes from frame to frame (a continuously changing size would rebuild fonts every frame).
+    static let glyphFontSize: CGFloat = 48
+    static let glyphFont = Font.system(size: 48, weight: .heavy, design: .rounded)
+
     private func drawText(_ string: String, at p: CGPoint, size: CGFloat, alpha: Double, in ctx: inout GraphicsContext) {
         guard alpha > 0.01, size > 1 else { return }
-        let font = Font.system(size: size, weight: .heavy, design: .rounded)
-        let shadow = ctx.resolve(Text(verbatim: string).font(font).foregroundStyle(res.glyphShadow))
-        let main = ctx.resolve(Text(verbatim: string).font(font).foregroundStyle(res.glyph))
-        let saved = ctx.opacity
-        ctx.opacity = min(alpha, 1)
-        ctx.draw(shadow, at: CGPoint(x: p.x + size * 0.05, y: p.y + size * 0.05), anchor: .center)
-        ctx.draw(main, at: p, anchor: .center)
-        ctx.opacity = saved
+        // Resolved once without a foreground style; the shadow and the glyph are drawn by switching `shading`.
+        var resolved = ctx.resolve(Text(verbatim: string).font(CanvasScene.glyphFont))
+        let k = size / CanvasScene.glyphFontSize
+        var c = ctx
+        c.opacity = min(alpha, 1)
+        c.translateBy(x: p.x, y: p.y)
+        c.scaleBy(x: k, y: k)
+        let offset = CanvasScene.glyphFontSize * 0.05
+        resolved.shading = .color(res.glyphShadow)
+        c.draw(resolved, at: CGPoint(x: offset, y: offset), anchor: .center)
+        resolved.shading = .color(res.glyph)
+        c.draw(resolved, at: .zero, anchor: .center)
     }
 
     // MARK: - Sparkle field (§3.8)
 
-    /// 40 ambient sparkles (+20 for a burst, + up to 20 fireflies for `.dome` designs), 4-point stars, additive blend.
-    /// Alpha is quantised into four bins so the whole field costs at most four fills.
+    /// 40 ambient sparkles (+20 burst slots), 4-point stars. For `.dome` designs the first `round(20·accessory)`
+    /// burst slots become extra ambient fireflies (seeds 40…), exactly like the Metal `sparkleVertex`; only the
+    /// remaining slots draw burst particles.
+    /// Alpha is quantised into eight bins drawn at their mid value (error ≤ ±1/16 around `sin(πt)·rate`), so the
+    /// whole field costs at most eight fills. Sparkles blend additively (`.plusLighter`: premultiplied
+    /// `colour·α` is added to the destination), matching §3.8 and the Metal sparkle pipeline (source/destination
+    /// RGB factors `.one`), through a clipped context copy — no offscreen layer. The star's waist (inner radius
+    /// 0.36) is wider than the Metal star's, which stands in for the Metal fragment's soft core glow: along the
+    /// diagonals the Canvas edge sits at 0.36·size, the Metal star+core half-coverage contour at ≈ 0.3·size.
     func drawSparkles(in ctx: inout GraphicsContext, clip: Path?) {
         let rate = min(max(pose.effects.sparkleRate, 0), 1)
         let burst = min(max(pose.effects.sparkleBurst, 0), 1)
-        let boost = features.contains(.dome) ? Int((min(max(pose.body.accessory, 0), 1) * 20).rounded()) : 0
+        let accessory = pose.body.accessory
+        let boost = features.contains(.dome) && accessory.isFinite ? Int((min(max(accessory, 0), 1) * 20).rounded()) : 0
         guard rate > 0.01 || burst > 0.01 else { return }
 
-        var bin0 = Path()
-        var bin1 = Path()
-        var bin2 = Path()
-        var bin3 = Path()
+        var bins = SparkleBins()
         let t = pose.time
 
         func fract(_ x: Float) -> Float { x - x.rounded(.down) }
 
         func emit(_ x: Float, _ y: Float, _ size: Float, _ alpha: Float) {
             guard alpha > 0.04, size > 0.002 else { return }
-            let center = CGPoint(x: CGFloat(x), y: CGFloat(y))
-            let r = CGFloat(size)
-            switch min(3, Int(alpha * 4)) {
-            case 0: CharacterPaths.addStar4(to: &bin0, center: center, radius: r)
-            case 1: CharacterPaths.addStar4(to: &bin1, center: center, radius: r)
-            case 2: CharacterPaths.addStar4(to: &bin2, center: center, radius: r)
-            default: CharacterPaths.addStar4(to: &bin3, center: center, radius: r)
-            }
+            bins.add(alpha: alpha, center: CGPoint(x: CGFloat(x), y: CGFloat(y)), radius: CGFloat(size))
         }
 
         if rate > 0.01 {
@@ -136,7 +143,8 @@ extension CanvasScene {
             }
         }
         if burst > 0.01 {
-            for i in 40..<60 {
+            // Slots 40..<(40 + boost) are already drawn as fireflies above (boost ∈ 0...20, so the range is valid).
+            for i in (40 + boost)..<60 {
                 let fi = Float(i)
                 let seed = fract(sin(fi * 12.9898) * 43758.5453)
                 let seed2 = fract(seed * 7.1 + 0.37)
@@ -152,33 +160,70 @@ extension CanvasScene {
             }
         }
 
+        var c = ctx
+        if let clip {
+            c.clip(to: clip)
+        }
+        c.blendMode = .plusLighter
         let m = base.matrix
-        let p0 = bin0.applying(m)
-        let p1 = bin1.applying(m)
-        let p2 = bin2.applying(m)
-        let p3 = bin3.applying(m)
         let color = res.sparkle
-        ctx.drawLayer { layer in
-            if let clip {
-                layer.clip(to: clip)
-            }
-            layer.blendMode = .plusLighter
-            if !p0.isEmpty {
-                layer.opacity = 0.25
-                layer.fill(p0, with: .color(color))
-            }
-            if !p1.isEmpty {
-                layer.opacity = 0.5
-                layer.fill(p1, with: .color(color))
-            }
-            if !p2.isEmpty {
-                layer.opacity = 0.75
-                layer.fill(p2, with: .color(color))
-            }
-            if !p3.isEmpty {
-                layer.opacity = 1.0
-                layer.fill(p3, with: .color(color))
-            }
+        for k in 0..<SparkleBins.count {
+            let path = bins.path(k)
+            guard !path.isEmpty else { continue }
+            c.opacity = SparkleBins.opacity(k)
+            c.fill(path.applying(m), with: .color(color))
+        }
+    }
+}
+
+/// Eight alpha bins for the sparkle field (unit-space star paths). A sparkle of alpha `a` goes into bin
+/// `min(7, Int(a·8))`, which is filled at the bin's mid value `(k + 0.5)/8`.
+struct SparkleBins {
+    static let count = 8
+
+    private var bin0 = Path()
+    private var bin1 = Path()
+    private var bin2 = Path()
+    private var bin3 = Path()
+    private var bin4 = Path()
+    private var bin5 = Path()
+    private var bin6 = Path()
+    private var bin7 = Path()
+
+    /// Fill opacity of bin `k`.
+    static func opacity(_ k: Int) -> Double {
+        (Double(k) + 0.5) / Double(count)
+    }
+
+    /// Bin index for `alpha` (0 for anything non-positive or non-finite).
+    static func index(alpha: Float) -> Int {
+        guard alpha.isFinite, alpha > 0 else { return 0 }
+        return min(count - 1, Int(min(alpha, 1) * Float(count)))
+    }
+
+    mutating func add(alpha: Float, center: CGPoint, radius: CGFloat) {
+        switch SparkleBins.index(alpha: alpha) {
+        case 0: CharacterPaths.addStar4(to: &bin0, center: center, radius: radius)
+        case 1: CharacterPaths.addStar4(to: &bin1, center: center, radius: radius)
+        case 2: CharacterPaths.addStar4(to: &bin2, center: center, radius: radius)
+        case 3: CharacterPaths.addStar4(to: &bin3, center: center, radius: radius)
+        case 4: CharacterPaths.addStar4(to: &bin4, center: center, radius: radius)
+        case 5: CharacterPaths.addStar4(to: &bin5, center: center, radius: radius)
+        case 6: CharacterPaths.addStar4(to: &bin6, center: center, radius: radius)
+        default: CharacterPaths.addStar4(to: &bin7, center: center, radius: radius)
+        }
+    }
+
+    func path(_ k: Int) -> Path {
+        switch k {
+        case 0: return bin0
+        case 1: return bin1
+        case 2: return bin2
+        case 3: return bin3
+        case 4: return bin4
+        case 5: return bin5
+        case 6: return bin6
+        default: return bin7
         }
     }
 }

@@ -23,7 +23,10 @@ enum CharacterPaths {
     static func addArc(to path: inout Path, center: CGPoint, radius: CGFloat,
                        startAngle: CGFloat, endAngle: CGFloat, connect: Bool) {
         let sweep = endAngle - startAngle
-        let segments = max(1, Int(ceil(abs(sweep) / halfPi - 0.0001)))
+        // A non-finite angle or radius (NaN from a corrupt pose) must not reach `Int(_:)`, which traps.
+        guard sweep.isFinite, startAngle.isFinite, radius.isFinite, center.x.isFinite, center.y.isFinite else { return }
+        let segmentCount = min(16, max(1, ceil(abs(sweep) / halfPi - 0.0001)))
+        let segments = Int(segmentCount)
         let step = sweep / CGFloat(segments)
         let k = 4.0 / 3.0 * tan(step / 4)
         var a0 = startAngle
@@ -45,8 +48,9 @@ enum CharacterPaths {
     }
 
     /// Closed Catmull-Rom spline through `count` points converted to cubic Béziers.
-    /// The first point of the path equals the last (C⁰ and C¹ closed).
-    static func closedSpline(count: Int, point: (Int) -> CGPoint) -> Path {
+    /// The first point of the path equals the last (C⁰ and C¹ closed). The point at index `corner`
+    /// (if any) is kept as a sharp corner: the segments meeting there use one-sided (chord) tangents.
+    static func closedSpline(count: Int, corner: Int = -1, point: (Int) -> CGPoint) -> Path {
         var path = Path()
         guard count >= 3 else { return path }
         var p0 = point(count - 1)
@@ -55,8 +59,18 @@ enum CharacterPaths {
         path.move(to: p1)
         for i in 0..<count {
             let p3 = point((i + 2) % count)
-            let c1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
-            let c2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+            let c1: CGPoint
+            if i == corner {
+                c1 = CGPoint(x: p1.x + (p2.x - p1.x) / 3, y: p1.y + (p2.y - p1.y) / 3)
+            } else {
+                c1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
+            }
+            let c2: CGPoint
+            if (i + 1) % count == corner {
+                c2 = CGPoint(x: p2.x - (p2.x - p1.x) / 3, y: p2.y - (p2.y - p1.y) / 3)
+            } else {
+                c2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+            }
             path.addCurve(to: p2, control1: c1, control2: c2)
             p0 = p1
             p1 = p2
@@ -296,23 +310,67 @@ enum CharacterPaths {
         (-0.3 * s + sqrt(0.09 * s * s + 2.8)) / 2
     }
 
-    /// `flame`: drop whose upper boundary is modulated by two sine tongues and whose tip sways with `wiggle`.
-    static func flameBody(wiggle w: CGFloat, samples: Int = 48) -> Path {
-        closedSpline(count: samples) { i in
-            let theta = twoPi * CGFloat(i) / CGFloat(samples)
-            let s = sin(theta)
-            let c = cos(theta)
-            var r = dropCircleRadius(sin: s)
-            if s > 0 {
-                r += 0.35 * s * s * s
-                r *= 1 + 0.06 * sin(5 * theta + 3 * w) + 0.03 * sin(9 * theta - 2 * w)
-            }
-            var x = r * c
-            let y = r * s
-            if y > 0.1 {
-                x += 0.22 * sin(w) * smoothstep(0.1, 1.05, y)
-            }
-            return CGPoint(x: x, y: y)
+    /// Point at `t` on the cubic Bézier `p0 → p3`.
+    static func cubicPoint(_ p0: CGPoint, _ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint, _ t: CGFloat) -> CGPoint {
+        let u = 1 - t
+        let k0 = u * u * u
+        let k1 = 3 * u * u * t
+        let k2 = 3 * u * t * t
+        let k3 = t * t * t
+        return CGPoint(x: k0 * p0.x + k1 * p1.x + k2 * p2.x + k3 * p3.x,
+                       y: k0 * p0.y + k1 * p1.y + k2 * p2.y + k3 * p3.y)
+    }
+
+    /// Samples per side and around the bottom arc of `dropOutlinePoint` (total 48, the §8 maximum).
+    static let dropSideSamples = 12
+    static let dropArcSamples = 24
+    static var dropOutlineCount: Int { 2 * dropSideSamples + dropArcSamples }
+
+    /// Point `i` (0 ..< 48) of the straight `drop` outline (same geometry as `dropBody(wiggle: 0)`: circle r 0.85
+    /// at (0, −0.15), convex sides with control points (±0.78, 0.55), tip at (0, 1.05)), counter-clockwise:
+    /// index 0 is the tip, 1 ..< 12 run down the left side, 12 ..< 36 go around the bottom arc starting at the left
+    /// side point, 36 ..< 48 climb the right side back towards the tip.
+    static func dropOutlinePoint(_ i: Int) -> CGPoint {
+        let r: CGFloat = 0.85
+        let cy: CGFloat = -0.15
+        let sideAngle: CGFloat = 0.0873
+        let sideX = r * cos(sideAngle)
+        let sideY = cy + r * sin(sideAngle)
+        let tip = CGPoint(x: 0, y: 1.05)
+        let side = dropSideSamples
+        let arc = dropArcSamples
+        if i < side {
+            let t = CGFloat(i) / CGFloat(side)
+            return cubicPoint(tip, CGPoint(x: -0.12, y: 0.82), CGPoint(x: -0.78, y: 0.55), CGPoint(x: -sideX, y: sideY), t)
+        }
+        if i < side + arc {
+            let u = CGFloat(i - side) / CGFloat(arc)
+            let angle = CGFloat.pi - sideAngle + (CGFloat.pi + 2 * sideAngle) * u
+            return CGPoint(x: r * cos(angle), y: cy + r * sin(angle))
+        }
+        let t = CGFloat(i - side - arc) / CGFloat(side)
+        return cubicPoint(CGPoint(x: sideX, y: sideY), CGPoint(x: 0.78, y: 0.55), CGPoint(x: 0.12, y: 0.82), tip, t)
+    }
+
+    /// Point `i` of the `flame` outline: the drop outline pushed radially by
+    /// `1 + (0.06·sin(5θ + 3w) + 0.03·sin(9θ − 2w) + flicker·sin(flickerPhase + 7y)) · smoothstep(−0.15, 0.25, y)`
+    /// (the MSL `sdFlame` modulation, which fades in smoothly instead of switching on at the equator), then the upper
+    /// part sways sideways by `0.22·sin(w)` so the tip leans.
+    static func flamePoint(_ i: Int, wiggle w: CGFloat, flickerPhase: CGFloat = 0, flicker: CGFloat = 0) -> CGPoint {
+        let p = dropOutlinePoint(i)
+        let theta = atan2(p.y, p.x)
+        let upper = smoothstep(-0.15, 0.25, p.y)
+        let m = 0.06 * sin(5 * theta + 3 * w) + 0.03 * sin(9 * theta - 2 * w) + flicker * sin(flickerPhase + 7 * p.y)
+        let k = 1 + m * upper
+        let y = p.y * k
+        return CGPoint(x: p.x * k + 0.22 * sin(w) * smoothstep(0.1, 1.05, y), y: y)
+    }
+
+    /// `flame` (§3.5): drop with a pointed tip whose upper boundary is modulated by two sine tongues (plus the
+    /// `.flicker` ripple of amplitude `flicker`, phase `flickerPhase`) and whose tip sways with `wiggle`.
+    static func flameBody(wiggle w: CGFloat, flickerPhase: CGFloat = 0, flicker: CGFloat = 0) -> Path {
+        closedSpline(count: dropOutlineCount, corner: 0) { i in
+            flamePoint(i, wiggle: w, flickerPhase: flickerPhase, flicker: flicker)
         }
     }
 
@@ -378,6 +436,16 @@ enum CharacterPaths {
             let r = radius(t)
             tube.addLine(to: CGPoint(x: c.x + n.x * r, y: c.y + n.y * r))
         }
+        // Round cap at the start (from +n through −tangent to −n): a flat end would leave its outer corner
+        // ≈ 0.05 outside the dome as a sharp step in the union.
+        let startC = q(0)
+        let startN = normal(0)
+        let startR = radius(0)
+        let startAngle = atan2(startN.y, startN.x)
+        for k in 1..<8 {
+            let a = startAngle + CGFloat.pi * CGFloat(k) / 8
+            tube.addLine(to: CGPoint(x: startC.x + startR * cos(a), y: startC.y + startR * sin(a)))
+        }
         tube.closeSubpath()
         return body.union(tube)
     }
@@ -394,15 +462,16 @@ enum CharacterPaths {
         return p.intersection(keep)
     }
 
-    /// Unit silhouette for a body shape. `wiggle` is the pose's wiggle phase (radians).
-    static func body(shape: BodyShape, wiggle: CGFloat) -> Path {
+    /// Unit silhouette for a body shape. `wiggle` is the pose's wiggle phase (radians); `flicker` / `flickerPhase`
+    /// drive the `.flicker` ripple of flame bodies (0 = none).
+    static func body(shape: BodyShape, wiggle: CGFloat, flickerPhase: CGFloat = 0, flicker: CGFloat = 0) -> Path {
         switch shape {
         case .round: return roundBody()
         case .star: return starBody()
         case .drop: return dropBody(wiggle: wiggle)
         case .hood: return hoodBody()
         case .cloud: return cloudBody()
-        case .flame: return flameBody(wiggle: wiggle)
+        case .flame: return flameBody(wiggle: wiggle, flickerPhase: flickerPhase, flicker: flicker)
         }
     }
 
@@ -481,38 +550,64 @@ enum CharacterPaths {
         ellipse(center: CGPoint(x: 0, y: 0.05), rx: 0.80, ry: 0.84)
     }
 
-    /// Collar region of the robe drawn over the body (below ≈ −0.55, dipping to −0.65 at the centre).
+    /// Collar region of the robe drawn over the body: everything below y = −0.55 + 0.05·x² (the MSL collar curve).
+    /// A quadratic Bézier with evenly spaced x is exactly that parabola: end points (±2.5, −0.2375), control (0, −0.8625).
     static func robeFrontMask() -> Path {
         var path = Path()
-        path.move(to: CGPoint(x: -2.5, y: -0.45))
-        path.addQuadCurve(to: CGPoint(x: 2.5, y: -0.45), control: CGPoint(x: 0, y: -0.85))
+        path.move(to: CGPoint(x: -2.5, y: -0.2375))
+        path.addQuadCurve(to: CGPoint(x: 2.5, y: -0.2375), control: CGPoint(x: 0, y: -0.8625))
         path.addLine(to: CGPoint(x: 2.5, y: -3))
         path.addLine(to: CGPoint(x: -2.5, y: -3))
         path.closeSubpath()
         return path
     }
 
-    /// ~40 tiny hash-positioned stars on the robe, skipping the face opening. Static.
-    static func robeStarField(count: Int = 40) -> Path {
+    /// Grid cell size (R units) of the `.starPattern` field: one star per cell.
+    static let starCellSize: CGFloat = 0.28
+
+    /// Integer hash of a grid cell, 24-bit result in [0, 1). Pure integer arithmetic, bit-identical to the MSL
+    /// `cellHash`, so both renderers place the robe stars at the same spots.
+    static func cellHash(x: Int32, y: Int32, salt: UInt32) -> CGFloat {
+        var h = UInt32(bitPattern: x) &* 73856093
+        h ^= UInt32(bitPattern: y) &* 19349663
+        h ^= salt &* 83492791
+        h ^= h >> 16
+        h = h &* 2146121005
+        h ^= h >> 15
+        h = h &* 2221713035
+        h ^= h >> 16
+        return CGFloat(h & 0xFFFFFF) / 16777216
+    }
+
+    /// Robe star field (`.starPattern`): one tiny four-point star per 0.28 R grid cell, hash-placed in the middle half
+    /// of its cell, tip radius 0.022 + 0.02·h — the field the MSL `starPattern` evaluates per pixel. Only cells that can
+    /// show on the robe are kept (≈ 50 stars); the painter clips the field to the robe and, behind the body, away from
+    /// the face opening. Static.
+    static func robeStarField() -> Path {
         var path = Path()
-        let center = CGPoint(x: 0, y: -0.25)
-        var i = 0
-        var placed = 0
-        while placed < count && i < count * 4 {
-            let h1 = hash(i)
-            let h2 = fract(h1 * 7.1 + 0.37)
-            let h3 = fract(h1 * 3.3 + 0.61)
-            i += 1
-            let a = h1 * twoPi
-            let r = 1.20 * sqrt(h2)
-            let p = CGPoint(x: center.x + r * cos(a), y: center.y + r * sin(a))
-            // Skip the face opening (ellipse (0, 0.05) radii (0.80, 0.84)) with a small margin.
-            let ex = p.x / 0.86
-            let ey = (p.y - 0.05) / 0.90
-            if ex * ex + ey * ey < 1 { continue }
-            if p.y > 1.0 { continue }
-            addStar4(to: &path, center: p, radius: 0.035 + 0.025 * h3, inner: 0.4)
-            placed += 1
+        let cs = starCellSize
+        for iy in Int32(-6)...Int32(5) {
+            for ix in Int32(-5)...Int32(4) {
+                let h1: CGFloat = cellHash(x: ix, y: iy, salt: 1)
+                let h2: CGFloat = cellHash(x: ix, y: iy, salt: 2)
+                let h3: CGFloat = cellHash(x: ix, y: iy, salt: 3)
+                let cellX = CGFloat(ix) + 0.5
+                let cellY = CGFloat(iy) + 0.5
+                let x: CGFloat = (cellX + (h1 - 0.5) * 0.5) * cs
+                let y: CGFloat = (cellY + (h2 - 0.5) * 0.5) * cs
+                // Robe = circle r 1.28 at (0, −0.25) plus the hood peak up to y ≈ 1.4.
+                let dy: CGFloat = y + 0.25
+                let r2: CGFloat = x * x + dy * dy
+                let inPeak = abs(x) < 0.6 && y > 0 && y < 1.45
+                let onRobe = r2 < 1.7424 || inPeak
+                // Fully inside the face opening and above the collar: never visible.
+                let ex: CGFloat = x / 0.75
+                let ey: CGFloat = (y - 0.05) / 0.79
+                let e2: CGFloat = ex * ex + ey * ey
+                let hidden = e2 < 1 && y > -0.45
+                if !onRobe || hidden { continue }
+                addStar4(to: &path, center: CGPoint(x: x, y: y), radius: 0.022 + 0.02 * h3, inner: 0.36)
+            }
         }
         return path
     }
@@ -533,32 +628,57 @@ enum CharacterPaths {
         return path
     }
 
-    /// Sprout's cap: everything above y = 0.35 with a scalloped lower edge (3 bumps). Clip to the body. Static.
+    /// Height of Sprout's scalloped cap edge at `x`: `0.35 − 0.09·(0.5 + 0.5·cos 10x)` (same as the MSL edge) —
+    /// three shallow 0.09-deep bumps across the face that never hang below y = 0.26.
+    static func capEdgeY(_ x: CGFloat) -> CGFloat {
+        0.35 - 0.09 * (0.5 + 0.5 * cos(10 * x))
+    }
+
+    /// Sprout's cap: everything above the scalloped edge `capEdgeY` (3 bumps across the body). Clip to the body.
+    /// Static. The edge is 24 cubic Hermite segments over x ∈ [−1.2, 1.2] using the exact slope `0.45·sin 10x`.
     static func capMask() -> Path {
         var path = Path()
-        let y: CGFloat = 0.35
+        let x0: CGFloat = -1.2
+        let x1: CGFloat = 1.2
+        let n = 24
+        let dx = (x1 - x0) / CGFloat(n)
         path.move(to: CGPoint(x: -1.6, y: 2.5))
-        path.addLine(to: CGPoint(x: -1.6, y: y))
-        path.addLine(to: CGPoint(x: -1.05, y: y))
-        // Three bumps hanging below the edge: arcs from 180° to 360° (through the bottom).
-        let centers: [CGFloat] = [-0.70, 0.0, 0.70]
-        for cx in centers {
-            addArc(to: &path, center: CGPoint(x: cx, y: y), radius: 0.35, startAngle: CGFloat.pi, endAngle: twoPi, connect: true)
+        path.addLine(to: CGPoint(x: -1.6, y: 0.35))
+        path.addLine(to: CGPoint(x: x0, y: capEdgeY(x0)))
+        for i in 0..<n {
+            let xa = x0 + dx * CGFloat(i)
+            let xb = xa + dx
+            let ya = capEdgeY(xa)
+            let yb = capEdgeY(xb)
+            let slopeA = 0.45 * sin(10 * xa)
+            let slopeB = 0.45 * sin(10 * xb)
+            path.addCurve(to: CGPoint(x: xb, y: yb),
+                          control1: CGPoint(x: xa + dx / 3, y: ya + slopeA * dx / 3),
+                          control2: CGPoint(x: xb - dx / 3, y: yb - slopeB * dx / 3))
         }
-        path.addLine(to: CGPoint(x: 1.6, y: y))
+        path.addLine(to: CGPoint(x: 1.6, y: 0.35))
         path.addLine(to: CGPoint(x: 1.6, y: 2.5))
         path.closeSubpath()
         return path
     }
 
+    /// Unit disc (radius 1 at the origin): filled through a context transform to draw soft gradient ellipses.
+    static func unitDisc() -> Path {
+        Path(ellipseIn: CGRect(x: -1, y: -1, width: 2, height: 2))
+    }
+
     /// Spark's brain: six circles forming two lobes around `center`, overall radius `radius`.
-    static func brain(center c: CGPoint, radius r: CGFloat) -> Path {
+    /// `inset` (unit-space length) shrinks every circle by that amount: the union of the shrunk circles is the
+    /// `d < −inset` level set of the MSL `drawBrain` distance (a min of the circle distances), so the painter can
+    /// build the brain's rim bands from it.
+    static func brain(center c: CGPoint, radius r: CGFloat, inset: CGFloat = 0) -> Path {
         let k = r / 0.30
         var path = Path()
         func blob(_ x: CGFloat, _ y: CGFloat, _ radius: CGFloat) {
             let bx = c.x + x * k
             let by = c.y + y * k
-            let br = radius * k
+            let br = radius * k - inset
+            guard br > 0 else { return }
             path.addEllipse(in: CGRect(x: bx - br, y: by - br, width: br * 2, height: br * 2))
         }
         blob(-0.13, 0.03, 0.165)
@@ -570,7 +690,9 @@ enum CharacterPaths {
         return path
     }
 
-    /// Grooves of the brain (to be stroked): central fissure + two short curls per lobe.
+    /// Grooves of the brain (to be stroked): central fissure + two short curls per lobe. The fissure starts at
+    /// (0, −0.16)·k, below the brain's lower edge at x = 0 (≈ −0.07·k), so the stroke must be clipped to `brain`
+    /// (as the MSL clips the grooves to the brain coverage).
     static func brainGrooves(center c: CGPoint, radius r: CGFloat) -> Path {
         let k = r / 0.30
         var path = Path()

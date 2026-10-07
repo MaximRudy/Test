@@ -1,0 +1,42 @@
+{
+  "sourceLanguage" : "ru",
+  "strings" : {
+    "app.name" : {
+      "comment" : "Product name. The catalog exists so the bundle declares both the ru and en localizations; UI strings live in L10n (AppTheme.swift).",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lumi Tales"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lumi Tales"
+          }
+        }
+      }
+    },
+    "app.tagline" : {
+      "comment" : "Short description of the app.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Fairy tales told by little glowing friends"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сказки, которые рассказывают светящиеся друзья"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

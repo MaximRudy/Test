@@ -48,10 +48,10 @@ enum CharacterColors {
     @MainActor private static var cache: [CharacterKind: CanvasResources] = [:]
 
     /// Cached colours, gradients and static unit paths for a design. One instance per `CharacterKind`
-    /// (the catalog's designs are static, so the kind identifies the palette and the static geometry).
+    /// (§8); the entry is rebuilt when a custom design reuses a kind with another palette, shape or features.
     @MainActor
     static func resources(for design: CharacterDesign) -> CanvasResources {
-        if let cached = cache[design.kind] {
+        if let cached = cache[design.kind], cached.matches(design) {
             return cached
         }
         let created = CanvasResources(design: design)
@@ -72,6 +72,10 @@ enum CharacterColors {
 @MainActor
 final class CanvasResources {
     let kind: CharacterKind
+    /// The design values these resources were built from (cache validation).
+    let palette: Palette
+    let bodyShape: BodyShape
+    let features: DesignFeatures
 
     // Palette as Colors.
     let bodyTop: Color
@@ -93,15 +97,16 @@ final class CanvasResources {
     // Derived colours (alpha baked in where the contract fixes it).
     let white: Color
     let eyeHighlight: Color       // white α 0.95
-    let highlightSoft: Color      // highlight α 0.35
-    let rimShadow: Color          // shadow α 0.35
+    let rimBand1: Color           // shadow α 0.020 — rim ramp, outermost band (0.08 deep)
+    let rimBand2: Color           // shadow α 0.055 — 0.055 deep
+    let rimBand3: Color           // shadow α 0.125 — 0.03 deep
+    let rimBand4: Color           // shadow α 0.135 — 0.012 deep (≈ 0.30 combined at the edge)
     let rimShadowSoft: Color      // shadow α 0.12
     let limbalRing: Color         // pupil α 0.35
     let browColor: Color          // outline α 0.9
     let lipLine: Color            // outline α 0.35
     let lidShadow: Color          // outline α 0.18
     let legColor: Color           // bodyBottom darkened 15 %
-    let shoulderShadow: Color     // shadow α 0.25
     let robeStar: Color           // accent2 α 0.7
     let accentDark: Color         // accent darkened 30 %
     let accent2Dark: Color        // accent2 darkened 35 %
@@ -109,16 +114,24 @@ final class CanvasResources {
     let glassRim: Color           // accent2 α 0.35
     let specular: Color           // white α 0.35
     let reflection: Color         // white α 0.15
-    let innerFlame: Color         // accent α 0.85
+    let innerFlame: Color         // accent α 0.85 (highlight for `.dome` designs, whose accent is the wooden base)
     let tearColor: Color          // (0.6, 0.8, 1.0)
     let sparkle: Color            // mix(glow, white, 0.5)
     let wandColor: Color          // shadow
     let glyph: Color              // white
     let glyphShadow: Color        // outline α 0.6
+    let glowBand: Color           // glow α 0.35 (outer band of the blurred `.high` glow)
+    let capShadowNear: Color      // shadow α 0.15 (first 0.035 under Sprout's cap edge)
+    let capShadowFar: Color       // shadow α 0.06 (first 0.07 under the cap edge)
+    let brainRimOuter: Color      // accent2 × 0.8 α 0.065 — Spark's brain rim ramp, outer band (0.04 deep)
+    let brainRimInner: Color      // accent2 × 0.8 α 0.29 — 0.015 deep (≈ 0.34 combined at the edge)
 
     // Gradients.
     let bodyGradient: Gradient         // bodyTop (y = +1) → bodyBottom (y = −1)
+    let highlightGradient: Gradient    // highlight α 0.35 → 0 over a unit disc: (1 − smoothstep(0.35, 1, ρ))·0.35
     let robeGradient: Gradient         // accent → accent darkened 25 %
+    let robeInteriorGradient: Gradient // robeGradient × 0.45 (hood interior seen through the face opening)
+    let darkFaceGradient: Gradient     // accent × 1.8 at the centre → accent at the rim (unit disc)
     let irisGradient: Gradient         // iris → 35 % darker at the rim
     let irisHaloGradient: Gradient     // iris α 0.6 → 0
     let glowHaloGradient: Gradient     // glow, exp(−d/0.35) outside the unit circle, for a circle of radius 1.9
@@ -127,6 +140,8 @@ final class CanvasResources {
     let cheekGradient: Gradient        // cheek α 1 with Gaussian falloff → 0
     let lidShadowGradient: Gradient    // outline α 0.18 → 0
     let baseGradient: Gradient         // accent → accent darkened 35 % (dome base)
+    let shoulderShadowGradient: Gradient // shadow α 0.28 → 0 (arm contact shadow)
+    let brainGradient: Gradient        // accent → mix(accent, accent2, 0.4) (Spark's brain, vertical shade)
 
     // Static unit-space paths.
     let staticBody: Path?
@@ -136,11 +151,17 @@ final class CanvasResources {
     let robeOpening: Path
     let robeFrontMask: Path
     let capMask: Path
+    let capShadowNearPath: Path        // capMask shifted down 0.035
+    let capShadowFarPath: Path         // capMask shifted down 0.07
     let haloCircle: Path               // circle r 1.9 at the origin
+    let unitDisc: Path                 // circle r 1 at the origin
 
     init(design: CharacterDesign) {
         let p = design.palette
         kind = design.kind
+        palette = p
+        bodyShape = design.bodyShape
+        features = design.features
 
         bodyTop = CharacterColors.color(p.bodyTop)
         bodyBottom = CharacterColors.color(p.bodyBottom)
@@ -160,15 +181,16 @@ final class CanvasResources {
 
         white = CharacterColors.color(CharacterColors.white)
         eyeHighlight = CharacterColors.color(CharacterColors.white, alpha: 0.95)
-        highlightSoft = CharacterColors.color(p.highlight, alpha: 0.35)
-        rimShadow = CharacterColors.color(p.shadow, alpha: 0.35)
+        rimBand1 = CharacterColors.color(p.shadow, alpha: 0.020)
+        rimBand2 = CharacterColors.color(p.shadow, alpha: 0.055)
+        rimBand3 = CharacterColors.color(p.shadow, alpha: 0.125)
+        rimBand4 = CharacterColors.color(p.shadow, alpha: 0.135)
         rimShadowSoft = CharacterColors.color(p.shadow, alpha: 0.12)
         limbalRing = CharacterColors.color(p.pupil, alpha: 0.35)
         browColor = CharacterColors.color(p.outline, alpha: 0.9)
         lipLine = CharacterColors.color(p.outline, alpha: 0.35)
         lidShadow = CharacterColors.color(p.outline, alpha: 0.18)
         legColor = CharacterColors.color(CharacterColors.darkened(p.bodyBottom, by: 0.15))
-        shoulderShadow = CharacterColors.color(p.shadow, alpha: 0.25)
         robeStar = CharacterColors.color(p.accent2, alpha: 0.7)
         accentDark = CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.30))
         accent2Dark = CharacterColors.color(CharacterColors.darkened(p.accent2, by: 0.35))
@@ -176,15 +198,47 @@ final class CanvasResources {
         glassRim = CharacterColors.color(p.accent2, alpha: 0.35)
         specular = CharacterColors.color(CharacterColors.white, alpha: 0.35)
         reflection = CharacterColors.color(CharacterColors.white, alpha: 0.15)
-        innerFlame = CharacterColors.color(p.accent, alpha: 0.85)
+        // Lumie's accent is the wooden dome base, so dome designs light the inner flame with the highlight
+        // colour (same rule as the Metal shader).
+        innerFlame = CharacterColors.color(design.features.contains(.dome) ? p.highlight : p.accent, alpha: 0.85)
         tearColor = CharacterColors.color(CharacterColors.tear)
         sparkle = CharacterColors.color(CharacterColors.mix(p.glow, CharacterColors.white, 0.5))
         wandColor = CharacterColors.color(p.shadow)
         glyph = CharacterColors.color(CharacterColors.white)
         glyphShadow = CharacterColors.color(p.outline, alpha: 0.6)
+        glowBand = CharacterColors.color(p.glow, alpha: 0.35)
+        capShadowNear = CharacterColors.color(p.shadow, alpha: 0.15)
+        capShadowFar = CharacterColors.color(p.shadow, alpha: 0.06)
+        // MSL drawBrain rim: mix(col, accent2·0.8, 0.5·rim²), rim = (d + 0.04)/0.04. Two bands average the ramp:
+        // 0.065 over 0.015…0.04 deep, and 0.065 + 0.29·(1 − 0.065) ≈ 0.336 over the outermost 0.015.
+        let brainRim = CharacterColors.darkened(p.accent2, by: 0.2)
+        brainRimOuter = CharacterColors.color(brainRim, alpha: 0.065)
+        brainRimInner = CharacterColors.color(brainRim, alpha: 0.29)
 
         bodyGradient = Gradient(colors: [bodyTop, bodyBottom])
+        // (1 − smoothstep(0.35, 1, ρ)) · 0.35 sampled at ρ = 0, 0.35, 0.5, 0.675, 0.85, 1.
+        highlightGradient = Gradient(stops: [
+            Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0.35), location: 0),
+            Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0.35), location: 0.35),
+            Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0.303), location: 0.5),
+            Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0.175), location: 0.675),
+            Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0.047), location: 0.85),
+            Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0), location: 1),
+        ])
         robeGradient = Gradient(colors: [accent, CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.25))])
+        robeInteriorGradient = Gradient(colors: [
+            CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.55)),
+            CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.6625)),
+        ])
+        // mix(accent·1.8, accent, smoothstep(−0.45, 0, d)) with d ≈ 0.76·(ρ − 1) for the (0.72, 0.80) ellipse.
+        let faceLight = SIMD4<Float>(p.accent.x * 1.8, p.accent.y * 1.8, p.accent.z * 1.8, p.accent.w)
+        darkFaceGradient = Gradient(stops: [
+            Gradient.Stop(color: CharacterColors.color(faceLight), location: 0),
+            Gradient.Stop(color: CharacterColors.color(faceLight), location: 0.41),
+            Gradient.Stop(color: CharacterColors.color(CharacterColors.mix(faceLight, p.accent, 0.247)), location: 0.6),
+            Gradient.Stop(color: CharacterColors.color(CharacterColors.mix(faceLight, p.accent, 0.734)), location: 0.8),
+            Gradient.Stop(color: accent, location: 1),
+        ])
         irisGradient = Gradient(stops: [
             Gradient.Stop(color: iris, location: 0),
             Gradient.Stop(color: iris, location: 0.45),
@@ -222,6 +276,13 @@ final class CanvasResources {
         ])
         lidShadowGradient = Gradient(colors: [lidShadow, CharacterColors.color(p.outline, alpha: 0)])
         baseGradient = Gradient(colors: [accent, CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.35))])
+        shoulderShadowGradient = Gradient(stops: [
+            Gradient.Stop(color: CharacterColors.color(p.shadow, alpha: 0.28), location: 0),
+            Gradient.Stop(color: CharacterColors.color(p.shadow, alpha: 0.14), location: 0.5),
+            Gradient.Stop(color: CharacterColors.color(p.shadow, alpha: 0), location: 1),
+        ])
+        brainGradient = Gradient(colors: [CharacterColors.color(p.accent),
+                                          CharacterColors.color(CharacterColors.mix(p.accent, p.accent2, 0.4))])
 
         staticBody = CharacterPaths.isDynamic(design.bodyShape) ? nil : CharacterPaths.body(shape: design.bodyShape, wiggle: 0)
         moonCrescent = CharacterPaths.moonCrescent()
@@ -229,7 +290,16 @@ final class CanvasResources {
         robeStarField = CharacterPaths.robeStarField()
         robeOpening = CharacterPaths.robeOpening()
         robeFrontMask = CharacterPaths.robeFrontMask()
-        capMask = CharacterPaths.capMask()
+        let cap = CharacterPaths.capMask()
+        capMask = cap
+        capShadowNearPath = cap.applying(CGAffineTransform(translationX: 0, y: -0.035))
+        capShadowFarPath = cap.applying(CGAffineTransform(translationX: 0, y: -0.07))
         haloCircle = CharacterPaths.circle(center: .zero, radius: 1.9)
+        unitDisc = CharacterPaths.unitDisc()
+    }
+
+    /// True when these resources were built from `design`'s palette, silhouette and features.
+    func matches(_ design: CharacterDesign) -> Bool {
+        bodyShape == design.bodyShape && features == design.features && palette == design.palette
     }
 }

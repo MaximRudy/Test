@@ -12,19 +12,15 @@ struct RootView: View {
 
     var body: some View {
         TabView(selection: $selection) {
-            ShowcaseView()
-                .environment(\.tabIsActive, selection == .showcase)
-                .tabItem {
-                    Label(L10n.charactersTab, systemImage: "sparkles")
-                }
-                .tag(AppTab.showcase)
+            Tab(L10n.charactersTab, systemImage: "sparkles", value: AppTab.showcase) {
+                ShowcaseView()
+                    .environment(\.tabIsActive, selection == .showcase)
+            }
 
-            StoryView()
-                .environment(\.tabIsActive, selection == .stories)
-                .tabItem {
-                    Label(L10n.storiesTab, systemImage: "book.closed")
-                }
-                .tag(AppTab.stories)
+            Tab(L10n.storiesTab, systemImage: "book.closed", value: AppTab.stories) {
+                StoryView()
+                    .environment(\.tabIsActive, selection == .stories)
+            }
         }
         .tint(AppTheme.accent)
     }

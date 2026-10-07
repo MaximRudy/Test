@@ -75,7 +75,8 @@ public struct LipSyncTrack: Sendable, Equatable {
     // MARK: Sampling
 
     /// Coarticulated mouth at `t` seconds relative to the track start.
-    /// Returns the blended `MouthShape` and a speech energy (0.35 + 0.65 · vowel open-ness, 0 for silence).
+    /// Returns the blended `MouthShape` and a speech energy (0.35 + 0.65 · vowel open-ness, 0.35 for consonants,
+    /// 0 for silence).
     public func sample(at t: TimeInterval) -> (mouth: MouthShape, energy: Float) {
         let count = keyframes.count
         guard count > 0, t.isFinite else { return (.zero, 0) }
@@ -117,7 +118,9 @@ public struct LipSyncTrack: Sendable, Equatable {
                         let shape = viseme.shape
                         let amplitude = w * kf.weight
                         accumulated += shape.v * amplitude
-                        energy += w * (0.35 + 0.65 * shape.open * kf.weight)
+                        // CONTRACT §4.2: voiced base 0.35; only vowels add their open-ness on top.
+                        let voicedEnergy: Float = viseme.isVowel ? 0.35 + 0.65 * shape.open * kf.weight : 0.35
+                        energy += w * voicedEnergy
                     }
                 }
             }

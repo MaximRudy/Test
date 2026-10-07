@@ -42,30 +42,42 @@ public final class LipSyncMixer: LipSyncSource {
     }
 
     /// Internal variant with an energy multiplier (questions emphasise the last word's brows via `energy`).
+    ///
+    /// Entries stay ordered by start and never overlap (every schedule drops the entries that start at or after
+    /// `time` and clips the one before it), so only the tail is touched: amortised O(1) per call.
     func schedule(_ track: LipSyncTrack, startingAt time: TimeInterval, energyGain: Float) {
         guard !track.isEmpty, time.isFinite else { return }
-        var i = 0
-        while i < entries.count {
-            if entries[i].start >= time {
-                entries.remove(at: i)
-                continue
-            }
-            if entries[i].end > time {
-                let clipLength = time - entries[i].start
-                entries[i].track = entries[i].track.clipped(toDuration: clipLength)
-                entries[i].end = time
-                if entries[i].track.isEmpty {
-                    entries.remove(at: i)
-                    continue
-                }
-            }
-            i += 1
+        while let last = entries.last, last.start >= time {
+            entries.removeLast()
         }
-        onsets.removeAll { $0 >= time }
+        if let lastIndex = entries.indices.last, entries[lastIndex].end > time {
+            let clipped = entries[lastIndex].track.clipped(toDuration: time - entries[lastIndex].start)
+            if clipped.isEmpty {
+                entries.removeLast()
+            } else {
+                entries[lastIndex].track = clipped
+                entries[lastIndex].end = time
+            }
+        }
+        // Onsets are kept sorted: drop the ones the new track replaces, append its own (never before `time`).
+        while let last = onsets.last, last >= time {
+            onsets.removeLast()
+        }
         entries.append(Entry(track: track, start: time, end: time + track.duration, energyGain: max(0, energyGain)))
         for onset in track.wordOnsetTimes {
-            onsets.append(time + onset)
+            onsets.append(time + max(0, onset))
         }
+    }
+
+    /// Energy of an entry with gain. Gains above 1 (the last word of a question) also hold the energy near 0.95
+    /// for the whole voiced part of the word, so the emphasis survives the clamp to 1 instead of only lifting
+    /// already-loud vowels.
+    @inline(__always)
+    private static func emphasized(_ energy: Float, gain: Float) -> Float {
+        guard gain > 1 else { return energy * gain }
+        let emphasis = min(1, (gain - 1) / 0.35)
+        let voicing = min(1, energy / 0.35)
+        return max(energy * gain, 0.95 * emphasis * voicing)
     }
 
     /// Removes every scheduled track; the mouth closes smoothly on the next samples.
@@ -90,19 +102,21 @@ public final class LipSyncMixer: LipSyncSource {
         let window = LipSyncTrack.maxRampHalfWidth + 0.01
         for entry in entries {
             if entry.start - window > time { break }
-            if entry.end + window < time { continue }
-            let local = entry.track.sample(at: time - entry.start)
-            accumulated += local.mouth.v
-            energy += local.energy * entry.energyGain
+            // Speaking test first: the tail (0.12 s) is longer than the sampling window (0.07 s).
             if time >= entry.start - 0.02 && time <= entry.end + LipSyncMixer.speakingTail {
                 speaking = true
             }
+            if entry.end + window < time { continue }
+            let local = entry.track.sample(at: time - entry.start)
+            accumulated += local.mouth.v
+            energy += LipSyncMixer.emphasized(local.energy, gain: entry.energyGain)
         }
 
         var onsetPulse: Float = 0
         for onset in onsets {
+            if onset > time { break }   // sorted: the rest are in the future
             let elapsed = time - onset
-            if elapsed >= 0 && elapsed < LipSyncMixer.onsetDecay {
+            if elapsed < LipSyncMixer.onsetDecay {
                 let remaining = Float(1 - elapsed / LipSyncMixer.onsetDecay)
                 onsetPulse = max(onsetPulse, remaining * remaining)
             }

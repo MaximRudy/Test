@@ -12,7 +12,8 @@ public struct StorySegment: Sendable, Equatable, Identifiable {
     public var text: String
     /// Emotion the narrator switches to before speaking this segment (`nil` = keep the current one).
     public var emotion: Emotion?
-    /// Gesture played when the segment starts (`nil` = none).
+    /// Gesture for this segment (`nil` = none). `StoryPlayer` plays most gestures as the sentence starts;
+    /// mouth-taking ones (`.yawn`, `.wakeUp`) just before it, and `.sleep` after it has been spoken.
     public var gesture: Gesture?
     /// Seconds of silence after the segment (defaults to `StoryScript.defaultPauseAfter`).
     public var pauseAfter: TimeInterval
@@ -38,7 +39,10 @@ public struct StorySegment: Sendable, Equatable, Identifiable {
 /// * `[br]` — forces a segment break without sentence punctuation.
 ///
 /// Sentences are split on `.`, `!`, `?` and `…` (runs such as `?!` or `...` and closing quotes stay
-/// with the sentence; a `.` between two digits is a decimal point, not a terminator). Tags apply to the
+/// with the sentence; a `.` between two digits is a decimal point, not a terminator). A run does not end
+/// the sentence when the text goes on with a lowercase letter, or with a dash and a lowercase letter
+/// («Привет!» — сказал ёжик; "Ну... а потом"), or when the `.` closes a known abbreviation ("Mr. Fox").
+/// Punctuation left detached by a removed tag is glued back ("Hello [happy], friend." → "Hello, friend."). Tags apply to the
 /// segment that follows them — i.e. to the next segment that is produced after the tag — so
 /// `[sad] It rained.` makes "It rained." sad and `[pause:1] Goodnight.` keeps one second of silence
 /// after "Goodnight.". Unknown tags are dropped from the text. Tag-shaped brackets that are not tags
@@ -201,8 +205,11 @@ struct StoryTagScanner {
             buffer.append(ch)
             index += 1
             if StoryTagScanner.isTerminator(ch) && !isDecimalPoint(at: index - 1) {
+                let runStart = buffer.count - 1
                 consumeTrailingPunctuation()
-                flush()
+                if !continuesSentence(from: index) && !isAbbreviation(runStart: runStart) {
+                    flush()
+                }
             }
         }
         flush()
@@ -259,7 +266,15 @@ struct StoryTagScanner {
     }
 
     private mutating func flush() {
-        let text = String(buffer).split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        // Collapse whitespace; punctuation that a removed tag left detached ("Hello [happy], friend.")
+        // is glued back to the previous word.
+        var text = ""
+        for word in String(buffer).split(whereSeparator: { $0.isWhitespace }) {
+            if !text.isEmpty && !StoryTagScanner.attachesToPreviousWord(word.first) {
+                text.append(" ")
+            }
+            text.append(contentsOf: word)
+        }
         buffer.removeAll(keepingCapacity: true)
         guard !text.isEmpty else { return }
         let segment = StorySegment(id: segments.count,
@@ -292,11 +307,55 @@ struct StoryTagScanner {
         return chars[position - 1].isNumber && chars[position + 1].isNumber
     }
 
+    /// True when the text after a terminator run (starting at `position`) clearly continues the same
+    /// sentence: the next visible character is a lowercase letter ("Ну... а потом", "в 1999 г. летом"),
+    /// or a dash followed by a lowercase letter (direct speech: «Привет!» — сказал ёжик).
+    private func continuesSentence(from position: Int) -> Bool {
+        var i = position
+        while i < chars.count && chars[i].isWhitespace { i += 1 }
+        guard i < chars.count else { return false }
+        let next = chars[i]
+        if next.isLowercase { return true }
+        guard StoryTagScanner.isDash(next) else { return false }
+        var j = i + 1
+        while j < chars.count && chars[j].isWhitespace { j += 1 }
+        return j < chars.count && chars[j].isLowercase
+    }
+
+    /// True when the punctuation run that starts at `runStart` in `buffer` is a single `.` closing a known
+    /// abbreviation ("Mr. Fox", "ул. Лесная"), which does not end the sentence.
+    private func isAbbreviation(runStart: Int) -> Bool {
+        guard runStart >= 0, runStart == buffer.count - 1, buffer[runStart] == "." else { return false }
+        var start = runStart
+        while start > 0 && buffer[start - 1].isLetter { start -= 1 }
+        guard start < runStart else { return false }
+        let word = String(buffer[start..<runStart]).lowercased()
+        return StoryTagScanner.abbreviations.contains(word)
+    }
+
+    /// Words that are followed by a period without ending the sentence. Single-letter Russian abbreviations
+    /// ("т. е.", "г.") are not listed: they are normally followed by a lowercase word, which already keeps
+    /// the sentence together, while "и т. д. Потом…" must still split.
+    static let abbreviations: Set<String> = [
+        "mr", "mrs", "ms", "dr", "st", "prof", "mt",
+        "ул", "им", "св", "проф",
+    ]
+
     static func isTerminator(_ c: Character) -> Bool {
         c == "." || c == "!" || c == "?" || c == "…"
     }
 
     static func isClosingQuote(_ c: Character) -> Bool {
         c == "»" || c == "\"" || c == "”" || c == "’" || c == "'" || c == ")"
+    }
+
+    static func isDash(_ c: Character) -> Bool {
+        c == "—" || c == "–" || c == "-"
+    }
+
+    /// Punctuation that is written directly after the previous word (no space before it).
+    static func attachesToPreviousWord(_ c: Character?) -> Bool {
+        guard let c = c else { return false }
+        return c == "," || c == "." || c == "!" || c == "?" || c == "…" || c == ":" || c == ";" || c == "»" || c == ")"
     }
 }
