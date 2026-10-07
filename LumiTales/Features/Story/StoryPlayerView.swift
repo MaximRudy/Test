@@ -5,9 +5,10 @@ import StoryCharacters
 /// word highlighted, a segment counter, a progress bar and transport controls.
 /// Playback pauses automatically when the view disappears or the scene leaves the foreground.
 ///
-/// The narrator rig and the `StoryPlayer` are created on first appearance rather than in the initializer:
-/// SwiftUI re-runs this initializer whenever the navigation destination is re-evaluated, and objects built
-/// there would be thrown away by `@State` each time.
+/// The narrator rig, the `StoryPlayer` and the parsed segments are created on first appearance rather than
+/// in the initializer: SwiftUI re-runs this initializer whenever the navigation destination is re-evaluated,
+/// and objects built there would be thrown away by `@State` each time. All three are set in the same
+/// transaction, so the player screen's first frame already shows the first segment.
 @MainActor
 struct StoryPlayerView: View {
     let story: Story
@@ -17,13 +18,15 @@ struct StoryPlayerView: View {
 
     @State private var rig: CharacterRig?
     @State private var player: StoryPlayer?
+    /// The story's script segments, parsed once.
+    @State private var segments: [StorySegment] = []
 
     private var isPaused: Bool { !(tabIsActive && scenePhase == .active) }
 
     var body: some View {
         ZStack {
             if let rig, let player {
-                StoryPlayerScreen(story: story, rig: rig, player: player)
+                StoryPlayerScreen(story: story, segments: segments, rig: rig, player: player)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -36,6 +39,7 @@ struct StoryPlayerView: View {
         .onAppear {
             if rig == nil || player == nil {
                 let narratorRig = CharacterRig(kind: story.narrator)
+                segments = story.script.segments
                 rig = narratorRig
                 player = StoryPlayer(rig: narratorRig)
             }
@@ -52,6 +56,8 @@ struct StoryPlayerView: View {
 @MainActor
 struct StoryPlayerScreen: View {
     let story: Story
+    /// `story.script.segments`, parsed once by the owner.
+    let segments: [StorySegment]
     let rig: CharacterRig
     let player: StoryPlayer
 
@@ -59,7 +65,6 @@ struct StoryPlayerScreen: View {
     @Environment(\.tabIsActive) private var tabIsActive
     @Environment(\.verticalSizeClass) private var verticalSizeClass
 
-    @State private var segments: [StorySegment] = []
     @State private var hasStarted = false
     /// True between `onAppear` and `onDisappear`.
     @State private var isVisible = false
@@ -142,7 +147,6 @@ struct StoryPlayerScreen: View {
         isVisible = true
         if !hasStarted {
             hasStarted = true
-            segments = story.script.segments
             player.load(story)
             if canNarrate {
                 player.play()

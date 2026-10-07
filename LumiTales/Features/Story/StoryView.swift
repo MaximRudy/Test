@@ -170,7 +170,9 @@ struct StoryRow: View {
                     Text(story.languageCode.uppercased())
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1)
-                        .background(Capsule().fill(Color.white.opacity(0.1)))
+                        .background {
+                            Capsule().fill(Color.white.opacity(0.1))
+                        }
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)

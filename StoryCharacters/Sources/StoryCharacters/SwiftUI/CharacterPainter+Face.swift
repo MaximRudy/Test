@@ -70,12 +70,18 @@ extension CanvasScene {
         let topY = c.y - ry + 2 * ry * min(o, 1)
         let bottomY = c.y - ry + 2 * ry * 0.55 * q
 
-        // Closed (or squeezed shut) eye: a soft lash line where the lids meet.
+        // Closed (or squeezed shut) eye: a soft lash line where the lids meet — a quadratic from (−0.9·rx, y0) to
+        // (+0.9·rx, y0) whose middle sits at y0 + amp, i.e. y = y0 + amp·(1 − xn²) (same curve as the MSL).
+        // A relaxed closure (blink, sleep, wink) sags into a ∪ (amp −0.04); a cheek-squeezed one (laughing, giggle:
+        // lowerLid ≥ 0.45) blends into the happy ^ ^ arch (amp +0.05).
         if o < 0.04 || topY - bottomY < 0.02 {
             let lineY = o < 0.04 ? c.y - ry * 0.2 : (topY + bottomY) / 2
+            let happy = CharacterPaths.smoothstep(0.45, 0.85, q)
+            let amp: CGFloat = -0.04 + 0.09 * happy
+            let y0: CGFloat = lineY + 0.02 - 0.04 * happy
             var line = Path()
-            line.move(to: CGPoint(x: c.x - rx * 0.9, y: lineY + 0.02))
-            line.addQuadCurve(to: CGPoint(x: c.x + rx * 0.9, y: lineY + 0.02), control: CGPoint(x: c.x, y: lineY - 0.06))
+            line.move(to: CGPoint(x: c.x - rx * 0.9, y: y0))
+            line.addQuadCurve(to: CGPoint(x: c.x + rx * 0.9, y: y0), control: CGPoint(x: c.x, y: y0 + 2 * amp))
             ctx.stroke(head.path(line), with: .color(res.browColor),
                        style: StrokeStyle(lineWidth: head.length(0.035), lineCap: .round))
             return
@@ -92,7 +98,9 @@ extension CanvasScene {
         let irisPath = head.path(CharacterPaths.circle(center: irisCenter, radius: irisR))
         let irisShading = GraphicsContext.Shading.radialGradient(res.irisGradient, center: head.point(irisCenter),
                                                                  startRadius: 0, endRadius: head.length(irisR))
+        // Limbal ring entirely inside the iris, covering [irisR − 0.015, irisR] like the MSL.
         let limbalWidth = head.length(0.015)
+        let limbalPath = head.path(CharacterPaths.circle(center: irisCenter, radius: max(irisR - 0.0075, 0.001)))
         let pupilPath = head.path(CharacterPaths.circle(center: irisCenter, radius: max(pupilR, 0.001)))
 
         // Highlights follow the gaze at 25 %.
@@ -133,7 +141,7 @@ extension CanvasScene {
             eye.fill(haloPath, with: haloShading)
         }
         eye.fill(irisPath, with: irisShading)
-        eye.stroke(irisPath, with: .color(res.limbalRing), lineWidth: limbalWidth)
+        eye.stroke(limbalPath, with: .color(res.limbalRing), lineWidth: limbalWidth)
         eye.fill(pupilPath, with: .color(res.pupil))
         eye.fill(bigHighlight, with: .color(res.eyeHighlight))
         eye.fill(smallHighlight, with: .color(res.eyeHighlight))
@@ -210,11 +218,9 @@ extension CanvasScene {
                                                                restWidth: bigW, amount: lowerTeeth).applying(place))
             }
             if tongue > 0.02 {
-                // Tongue centre follows the smile warp at x = 0: lift(0) = smile·0.6·W·(0 − 0.33) (the MSL evaluates
-                // the tongue in warped space).
-                let centreLift = -0.33 * smile * 0.6 * bigW
-                tonguePath = head.path(CharacterPaths.ellipse(center: CGPoint(x: 0, y: -h * (1 - 0.45 * tongue) + centreLift),
-                                                              rx: 0.55 * w, ry: max(0.002, 0.45 * h * tongue)).applying(place))
+                // Tongue ellipse bent by the same smile warp lift(x) as the lips (the MSL evaluates it in warped space).
+                tonguePath = head.path(CharacterPaths.tongue(halfWidth: w, halfHeight: h, amount: tongue, smile: smile,
+                                                             restWidth: bigW).applying(place))
             }
         }
 

@@ -9,6 +9,11 @@ import Observation
 /// deltas on top of the speech mouth): most gestures play as the sentence starts; gestures that take
 /// over the mouth and eyes (`.yawn`, `.wakeUp`) play first and the narrator starts talking near their
 /// end; `.sleep` plays after the sentence has been spoken and the next segment waits for it.
+/// Pausing, skipping, stopping or loading fades out a gesture the player started that is still running,
+/// so a yawn lead-in or a sleep hold never carries over into other speech.
+///
+/// A segment without letters or digits ("…", "—") is not spoken: it is a silent beat that still sets its
+/// emotion, plays its gesture and keeps its pause.
 ///
 /// State machine: `idle → playing ⇄ paused → finished`. `stop()` returns to `idle` and calms the rig.
 /// Pause/resume is implemented as "stop speaking + re-speak the current segment" because
@@ -58,6 +63,8 @@ import Observation
     @ObservationIgnored private var pausedBySpeechEngine = false
     /// Segment whose gesture has already been played (so resuming does not repeat it).
     @ObservationIgnored private var gesturePlayedIndex: Int? = nil
+    /// Last gesture this player started on the rig (cancelled by `haltSpeech` while the rig still plays it).
+    @ObservationIgnored private var playerGesture: Gesture? = nil
     @ObservationIgnored private var hooked = false
     @ObservationIgnored private var previousHandler: ((SpeechEvent) -> Void)? = nil
 
@@ -221,12 +228,20 @@ import Observation
     }
 
     /// Stops playback and gives `rig.onSpeechEvent` back to whoever owned it before the player hooked in.
+    /// A finished story is rewound to the first segment; otherwise the current segment starts over on the
+    /// next `play()` (it no longer counts as spoken and its gesture plays again).
     public func detach() {
         haltSpeech()
         if hooked {
             rig.onSpeechEvent = previousHandler
             previousHandler = nil
             hooked = false
+        }
+        if state == .finished {
+            moveTo(0)
+        } else {
+            isCurrentSegmentSpoken = false
+            gesturePlayedIndex = nil
         }
         if state != .idle { state = .idle }
     }
@@ -276,10 +291,10 @@ import Observation
         if let gesture = segment.gesture, gesturePlayedIndex != segmentIndex {
             switch StoryPlayer.staging(of: gesture) {
             case .withSpeech:
-                rig.play(gesture)
+                playGesture(gesture)
                 gesturePlayedIndex = segmentIndex
             case .leadIn:
-                rig.play(gesture)
+                playGesture(gesture)
                 gesturePlayedIndex = segmentIndex
                 let duration = StoryPlayer.gestureDuration(gesture, emotion: emotion) * max(0, gestureTimeScale)
                 leadIn = StoryPlayer.leadInFraction * duration
@@ -289,8 +304,10 @@ import Observation
             }
         }
 
-        if segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            segmentDidFinish()
+        // Nothing speakable ("…", "—"): a silent beat. It lasts at least as long as a lead-in gesture so the
+        // next sentence does not start talking over it.
+        if !segment.text.contains(where: { $0.isLetter || $0.isNumber }) {
+            segmentDidFinish(minimumWait: leadIn)
             return
         }
 
@@ -338,6 +355,15 @@ import Observation
                 spokenRange = NSRange(location: location, length: length)
             }
         case .finished:
+            if state == .paused && pausedBySpeechEngine {
+                // The sentence ended while an engine pause was mirrored: count it, so the user's resume
+                // moves on to the next sentence instead of repeating this one.
+                speakingSegment = false
+                pausedBySpeechEngine = false
+                spokenRange = nil
+                isCurrentSegmentSpoken = true
+                return
+            }
             guard state == .playing else { return }
             segmentDidFinish()
         case .cancelled:
@@ -364,17 +390,17 @@ import Observation
     }
 
     /// The current sentence has been spoken: count it, play a trailing gesture, then wait `pauseAfter`
-    /// (or until the trailing gesture has played out, whichever is longer) before the next one.
-    private func segmentDidFinish() {
+    /// (or until the trailing gesture has played out, or `minimumWait`, whichever is longest) before the next one.
+    private func segmentDidFinish(minimumWait: TimeInterval = 0) {
         speakingSegment = false
         pausedBySpeechEngine = false
         spokenRange = nil
         isCurrentSegmentSpoken = true
         let pause = currentSegment?.pauseAfter ?? StoryScript.defaultPauseAfter
-        var wait = min(StoryPlayer.maxPause, max(0, pause))
+        var wait = max(min(StoryPlayer.maxPause, max(0, pause)), minimumWait)
         if let gesture = currentSegment?.gesture, gesturePlayedIndex != segmentIndex,
            StoryPlayer.staging(of: gesture) == .trailing {
-            rig.play(gesture)
+            playGesture(gesture)
             gesturePlayedIndex = segmentIndex
             let hold = StoryPlayer.gestureDuration(gesture, emotion: rig.emotion) * max(0, gestureTimeScale)
             wait = max(wait, hold)
@@ -409,7 +435,8 @@ import Observation
         state = .finished
     }
 
-    /// Cancels the pending task and stops the utterance this player started (other speech is left alone).
+    /// Cancels the pending task, stops the utterance this player started and fades out the gesture it
+    /// started if the rig is still playing it (other speech and gestures are left alone).
     private func haltSpeech() {
         cancelPendingTask()
         spokenRange = nil
@@ -418,6 +445,16 @@ import Observation
             speakingSegment = false
             rig.stopSpeaking()
         }
+        if let gesture = playerGesture {
+            playerGesture = nil
+            if rig.activeGesture == gesture { rig.cancelGesture() }
+        }
+    }
+
+    /// Plays `gesture` on the rig and remembers it as the player's own.
+    private func playGesture(_ gesture: Gesture) {
+        rig.play(gesture)
+        playerGesture = gesture
     }
 
     private func schedule(_ action: PendingAction, after seconds: TimeInterval) {

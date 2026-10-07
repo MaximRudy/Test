@@ -40,6 +40,11 @@ enum CharacterColors {
         SIMD4<Float>(c.x, c.y, c.z, alpha)
     }
 
+    /// Multiplies RGB by `k` (which may exceed 1) and clamps it to 0...1, keeps alpha — the MSL `min(c·k, 1)`.
+    static func scaled(_ c: SIMD4<Float>, by k: Float) -> SIMD4<Float> {
+        SIMD4<Float>(min(max(c.x * k, 0), 1), min(max(c.y * k, 0), 1), min(max(c.z * k, 0), 1), c.w)
+    }
+
     static let white = SIMD4<Float>(1, 1, 1, 1)
     static let tear = SIMD4<Float>(0.6, 0.8, 1.0, 1.0)
 
@@ -109,11 +114,16 @@ final class CanvasResources {
     let legColor: Color           // bodyBottom darkened 15 %
     let robeStar: Color           // accent2 α 0.7
     let accentDark: Color         // accent darkened 30 %
-    let accent2Dark: Color        // accent2 darkened 35 %
+    let robeRimSoft: Color        // accent2 α 0.22 — robe rim light, outer band (0.10 deep)
+    let robeRimHard: Color        // accent2 α 0.45 — 0.035 deep (≈ 0.57 combined at the edge)
     let glassFill: Color          // accent2 α 0.10
     let glassRim: Color           // accent2 α 0.35
     let specular: Color           // white α 0.35
+    let specularDim: Color        // white α 0.25 (second dome streak)
     let reflection: Color         // white α 0.15
+    let wandStripe: Color         // highlight α 0.35 (stripe along the wand)
+    let bookRimOuter: Color       // outline α 0.052 — book cover rim ramp, outer band (0.04 deep)
+    let bookRimInner: Color       // outline α 0.229 — 0.015 deep (≈ 0.27 combined at the edge)
     let innerFlame: Color         // accent α 0.85 (highlight for `.dome` designs, whose accent is the wooden base)
     let tearColor: Color          // (0.6, 0.8, 1.0)
     let sparkle: Color            // mix(glow, white, 0.5)
@@ -129,10 +139,10 @@ final class CanvasResources {
     // Gradients.
     let bodyGradient: Gradient         // bodyTop (y = +1) → bodyBottom (y = −1)
     let highlightGradient: Gradient    // highlight α 0.35 → 0 over a unit disc: (1 − smoothstep(0.35, 1, ρ))·0.35
-    let robeGradient: Gradient         // accent → accent darkened 25 %
+    let robeGradient: Gradient         // min(accent × 1.45, 1) at y ≥ 1 → accent × 0.72 at y ≤ −1.5 (MSL robeColor)
     let robeInteriorGradient: Gradient // robeGradient × 0.45 (hood interior seen through the face opening)
     let darkFaceGradient: Gradient     // accent × 1.8 at the centre → accent at the rim (unit disc)
-    let irisGradient: Gradient         // iris → 35 % darker at the rim
+    let irisGradient: Gradient         // iris → 35 % darker at the rim, linear in the radius (MSL iris·(1 − 0.35·t))
     let irisHaloGradient: Gradient     // iris α 0.6 → 0
     let glowHaloGradient: Gradient     // glow, exp(−d/0.35) outside the unit circle, for a circle of radius 1.9
     let softGlowGradient: Gradient     // glow α 1 → 0 (accessory glows, burst)
@@ -142,6 +152,7 @@ final class CanvasResources {
     let baseGradient: Gradient         // accent → accent darkened 35 % (dome base)
     let shoulderShadowGradient: Gradient // shadow α 0.28 → 0 (arm contact shadow)
     let brainGradient: Gradient        // accent → mix(accent, accent2, 0.4) (Spark's brain, vertical shade)
+    let bookGradient: Gradient         // accent2 × 0.7 → accent2 (book cover, along the book's y)
 
     // Static unit-space paths.
     let staticBody: Path?
@@ -193,11 +204,20 @@ final class CanvasResources {
         legColor = CharacterColors.color(CharacterColors.darkened(p.bodyBottom, by: 0.15))
         robeStar = CharacterColors.color(p.accent2, alpha: 0.7)
         accentDark = CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.30))
-        accent2Dark = CharacterColors.color(CharacterColors.darkened(p.accent2, by: 0.35))
+        // MSL robeColor rim light: mix(col, accent2, 0.60·rim³), rim = (d + 0.10)/0.10. Two strokes clipped to the
+        // robe approximate it: 0.22 over the outer 0.10, and 0.22 + 0.45·(1 − 0.22) ≈ 0.57 over the outermost 0.035.
+        robeRimSoft = CharacterColors.color(p.accent2, alpha: 0.22)
+        robeRimHard = CharacterColors.color(p.accent2, alpha: 0.45)
         glassFill = CharacterColors.color(p.accent2, alpha: 0.10)
         glassRim = CharacterColors.color(p.accent2, alpha: 0.35)
         specular = CharacterColors.color(CharacterColors.white, alpha: 0.35)
+        specularDim = CharacterColors.color(CharacterColors.white, alpha: 0.25)
         reflection = CharacterColors.color(CharacterColors.white, alpha: 0.15)
+        wandStripe = CharacterColors.color(p.highlight, alpha: 0.35)
+        // MSL book rim: mix(col, outline, 0.4·rim²), rim = (d + 0.04)/0.04. Two bands average the ramp: 0.052 over
+        // 0.015…0.04 deep, and 0.052 + 0.229·(1 − 0.052) ≈ 0.27 over the outermost 0.015.
+        bookRimOuter = CharacterColors.color(p.outline, alpha: 0.052)
+        bookRimInner = CharacterColors.color(p.outline, alpha: 0.229)
         // Lumie's accent is the wooden dome base, so dome designs light the inner flame with the highlight
         // colour (same rule as the Metal shader).
         innerFlame = CharacterColors.color(design.features.contains(.dome) ? p.highlight : p.accent, alpha: 0.85)
@@ -225,10 +245,24 @@ final class CanvasResources {
             Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0.047), location: 0.85),
             Gradient.Stop(color: CharacterColors.color(p.highlight, alpha: 0), location: 1),
         ])
-        robeGradient = Gradient(colors: [accent, CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.25))])
-        robeInteriorGradient = Gradient(colors: [
-            CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.55)),
-            CharacterColors.color(CharacterColors.darkened(p.accent, by: 0.6625)),
+        // MSL robeColor: mix(accent·0.72, min(accent·1.45, 1), clamp(0.4·y + 0.6, 0, 1)) — linear in y from y = −1.5 to
+        // y = 1 and flat beyond. The painter's gradient axis runs from the hood peak (y = 1.38, location 0) to below the
+        // hem (y = −1.55, location 1), so y = 1 sits at 0.38/2.93 ≈ 0.1297 and y = −1.5 at 2.88/2.93 ≈ 0.9829.
+        let robeTop = CharacterColors.scaled(p.accent, by: 1.45)
+        let robeBottom = CharacterColors.scaled(p.accent, by: 0.72)
+        robeGradient = Gradient(stops: [
+            Gradient.Stop(color: CharacterColors.color(robeTop), location: 0),
+            Gradient.Stop(color: CharacterColors.color(robeTop), location: 0.1297),
+            Gradient.Stop(color: CharacterColors.color(robeBottom), location: 0.9829),
+            Gradient.Stop(color: CharacterColors.color(robeBottom), location: 1),
+        ])
+        let interiorTop = CharacterColors.scaled(robeTop, by: 0.45)
+        let interiorBottom = CharacterColors.scaled(robeBottom, by: 0.45)
+        robeInteriorGradient = Gradient(stops: [
+            Gradient.Stop(color: CharacterColors.color(interiorTop), location: 0),
+            Gradient.Stop(color: CharacterColors.color(interiorTop), location: 0.1297),
+            Gradient.Stop(color: CharacterColors.color(interiorBottom), location: 0.9829),
+            Gradient.Stop(color: CharacterColors.color(interiorBottom), location: 1),
         ])
         // mix(accent·1.8, accent, smoothstep(−0.45, 0, d)) with d ≈ 0.76·(ρ − 1) for the (0.72, 0.80) ellipse.
         let faceLight = SIMD4<Float>(p.accent.x * 1.8, p.accent.y * 1.8, p.accent.z * 1.8, p.accent.w)
@@ -241,7 +275,6 @@ final class CanvasResources {
         ])
         irisGradient = Gradient(stops: [
             Gradient.Stop(color: iris, location: 0),
-            Gradient.Stop(color: iris, location: 0.45),
             Gradient.Stop(color: CharacterColors.color(CharacterColors.darkened(p.iris, by: 0.35)), location: 1),
         ])
         irisHaloGradient = Gradient(stops: [
@@ -283,6 +316,7 @@ final class CanvasResources {
         ])
         brainGradient = Gradient(colors: [CharacterColors.color(p.accent),
                                           CharacterColors.color(CharacterColors.mix(p.accent, p.accent2, 0.4))])
+        bookGradient = Gradient(colors: [CharacterColors.color(CharacterColors.darkened(p.accent2, by: 0.3)), accent2])
 
         staticBody = CharacterPaths.isDynamic(design.bodyShape) ? nil : CharacterPaths.body(shape: design.bodyShape, wiggle: 0)
         moonCrescent = CharacterPaths.moonCrescent()

@@ -164,7 +164,55 @@ final class CanvasPainterTests: XCTestCase {
         XCTAssertTrue(brain.contains(CGPoint(x: 0, y: c.y)))
     }
 
+    /// The brain at (0, 0.58)·0.27, sheared with the swaying drop tip, stays inside the drop silhouette even at full
+    /// sway and full pulse (it used to poke out of the head by up to ≈ 0.1 R).
+    func testBrainStaysInsideSwayingDrop() {
+        let c = CharacterPaths.brainCenter
+        for wiggle in [-CGFloat.pi / 2, 0, CGFloat.pi / 2] {
+            let tipX = 0.18 * sin(wiggle)
+            let drop = CharacterPaths.dropBody(wiggle: wiggle)
+            let shear = CharacterPaths.brainShear(tipX: tipX)
+            for pulse in [CGFloat(1), 1.08] {
+                let brain = CharacterPaths.brain(center: c, radius: CharacterPaths.brainRadius * pulse).applying(shear)
+                let box = brain.boundingRect
+                XCTAssertFalse(box.isEmpty)
+                var samples = 0
+                var outside = 0
+                for iy in 0...40 {
+                    for ix in 0...40 {
+                        let p = CGPoint(x: box.minX + box.width * CGFloat(ix) / 40,
+                                        y: box.minY + box.height * CGFloat(iy) / 40)
+                        guard brain.contains(p) else { continue }
+                        samples += 1
+                        if !drop.contains(p) { outside += 1 }
+                    }
+                }
+                XCTAssertGreaterThan(samples, 200)
+                XCTAssertEqual(outside, 0, "brain sticks out of the drop at tipX \(tipX), pulse \(pulse)")
+            }
+        }
+        // The linearised shear matches the drop shear tipX·smoothstep(0.05, 1.15, y) at the brain centre.
+        let shifted = c.applying(CharacterPaths.brainShear(tipX: 0.18))
+        XCTAssertEqual(shifted.x, 0.18 * CharacterPaths.smoothstep(0.05, 1.15, c.y), accuracy: 0.002)
+        XCTAssertEqual(shifted.y, c.y, accuracy: 1e-12)
+    }
+
     // MARK: - Mouth (§3.3)
+
+    /// The tongue follows the lips' smile warp: with a smile its sides rise relative to its middle, like the MSL
+    /// ellipse evaluated at (x, y − lift(x)).
+    func testTongueFollowsSmileWarp() {
+        let w: CGFloat = 0.2
+        let h: CGFloat = 0.1
+        let flat = CharacterPaths.tongue(halfWidth: w, halfHeight: h, amount: 0.6, smile: 0, restWidth: 0.2).boundingRect
+        XCTAssertEqual(flat.midX, 0, accuracy: 1e-3)
+        XCTAssertEqual(flat.width, 2 * 0.55 * w, accuracy: 0.01)
+        XCTAssertEqual(flat.midY, -h * (1 - 0.45 * 0.6), accuracy: 0.005)
+        let smiling = CharacterPaths.tongue(halfWidth: w, halfHeight: h, amount: 0.6, smile: 1, restWidth: 0.2).boundingRect
+        // lift(0) = −0.33·0.6·W dips the middle; the sides rise by 0.6·W·0.55² relative to it.
+        XCTAssertLessThan(smiling.minY, flat.minY - 0.02)
+        XCTAssertGreaterThan(smiling.height, flat.height)
+    }
 
     func testMouthSamplerIsClosed() {
         let pts = CharacterPaths.mouthSamples(halfWidth: 0.2, halfHeight: 0.1, smile: 0.5, restWidth: 0.2)
@@ -263,7 +311,7 @@ final class CanvasPainterTests: XCTestCase {
         XCTAssertFalse(a === c)
         XCTAssertNil(c.staticBody, "drop silhouette depends on wiggle and must not be cached")
         XCTAssertEqual(a.bodyGradient.stops.count, 2)
-        XCTAssertEqual(a.irisGradient.stops.count, 3)
+        XCTAssertEqual(a.irisGradient.stops.count, 2, "iris darkens linearly from the centre to the rim (§3.1, MSL)")
         CharacterColors.clearCache()
     }
 
@@ -373,6 +421,24 @@ final class CanvasPainterTests: XCTestCase {
         XCTAssertFalse(CharacterPaths.robeFrontMask().contains(CGPoint(x: 0, y: -0.50)))
         XCTAssertTrue(CharacterPaths.robeFrontMask().contains(CGPoint(x: 1.0, y: -0.55)))
         XCTAssertFalse(CharacterPaths.robeFrontMask().contains(CGPoint(x: 1.0, y: -0.45)))
+    }
+
+    /// The Canvas robe uses the MSL `robeColor` ramp: min(accent × 1.45, 1) at y ≥ 1 down to accent × 0.72 at
+    /// y ≤ −1.5, on a gradient axis from the hood peak (y 1.38) to below the hem (y −1.55).
+    func testRobeGradientMatchesTheMetalRobe() {
+        let lumi = CharacterCatalog.design(for: .lumi)
+        let res = CanvasResources(design: lumi)
+        XCTAssertEqual(res.robeGradient.stops.count, 4)
+        XCTAssertEqual(res.robeInteriorGradient.stops.count, 4)
+        XCTAssertEqual(res.robeGradient.stops[1].location, 0.38 / 2.93, accuracy: 1e-3)
+        XCTAssertEqual(res.robeGradient.stops[2].location, 2.88 / 2.93, accuracy: 1e-3)
+        XCTAssertEqual(res.robeGradient.stops[0].color, CharacterColors.color(CharacterColors.scaled(lumi.palette.accent, by: 1.45)))
+        XCTAssertEqual(res.robeGradient.stops[3].color, CharacterColors.color(CharacterColors.scaled(lumi.palette.accent, by: 0.72)))
+        // `scaled` clamps like the MSL `min(c·k, 1)` and keeps alpha.
+        let bright = CharacterColors.scaled(SIMD4<Float>(0.9, 0.5, 0.1, 0.8), by: 1.45)
+        XCTAssertEqual(bright.x, 1, accuracy: 1e-6)
+        XCTAssertEqual(bright.y, 0.725, accuracy: 1e-6)
+        XCTAssertEqual(bright.w, 0.8, accuracy: 1e-6)
     }
 
     func testInnerFlameColourFollowsDesign() {

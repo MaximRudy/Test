@@ -148,7 +148,7 @@ import simd
     }
 
     private func startGesture(_ gesture: Gesture, energy: Float) {
-        gestures.play(GestureClip(gesture: gesture, energy: energy), at: clockTime)
+        gestures.play(GestureClip(gesture: gesture, energy: energy, hasArms: hasArms), at: clockTime)
         if activeGesture != gesture { activeGesture = gesture }
     }
 
@@ -295,6 +295,9 @@ import simd
     /// Rig-local time as `Float` for the controllers.
     private var clockTime: Float { Float(localTime) }
 
+    /// Whether gesture clips may use the arms (armless designs re-target the wave to body and accessory).
+    private var hasArms: Bool { design.features.contains(.arms) }
+
     /// Refreshes the inactivity timer and wakes a character that fell asleep on its own: the emotion it had
     /// before dozing off comes back (unless the caller is about to set one) and a `.wakeUp` gesture plays.
     /// - Returns: true when this call woke the character up.
@@ -338,7 +341,7 @@ import simd
             intensityBeforeAutoSleep = emotionIntensity
             autoSleeping = true
             applyEmotion(.sleepy, intensity: 1)
-            gestures.play(GestureClip(gesture: .yawn, energy: 0.1), at: now)
+            gestures.play(GestureClip(gesture: .yawn, energy: 0.1, hasArms: hasArms), at: now)
             if activeGesture != .yawn { activeGesture = .yawn }
         }
 

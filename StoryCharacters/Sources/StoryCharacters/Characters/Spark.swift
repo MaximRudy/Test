@@ -7,7 +7,8 @@ extension CharacterCatalog {
     /// and feet. Bright and endlessly curious.
     ///
     /// Layout notes: the drop's round part is centred at (0, −0.15), so the face sits slightly low; the brain
-    /// occupies the forehead around y ≈ 0.62, brows rest just beneath it. Big dark irises fill the eyes.
+    /// occupies the forehead around (0, 0.58) with its lowest lobes at y ≈ 0.42, and the brows rest just beneath it
+    /// (browY 0.27, clear of the eye tops at 0.23 and of the brain while raised). Big dark irises fill the eyes.
     /// Idle: jelly wobble, flame-tip wiggle. Signature (Core): `.thinking` → brain pulses and glows (accessory 1);
     /// `.excited` → tip wiggles twice as fast.
     public static let spark: CharacterDesign = CharacterDesign(
@@ -19,7 +20,7 @@ extension CharacterCatalog {
                                           tongue: 0xFF8DA1, teeth: 0xFFFFFF, outline: 0x6A3E12),
         face: FaceLayout(eyeOffsetX: 0.36, eyeY: -0.02, eyeRadiusX: 0.21, eyeRadiusY: 0.25,
                          irisRadius: 0.165, pupilRadius: 0.09,
-                         browY: 0.29, browLength: 0.24, browThickness: 0.045,
+                         browY: 0.27, browLength: 0.24, browThickness: 0.045,
                          mouthY: -0.42, mouthWidth: 0.16, mouthHeight: 0.16,
                          cheekX: 0.50, cheekY: -0.30, cheekRadius: 0.13,
                          faceScale: 1, faceOffsetY: 0),

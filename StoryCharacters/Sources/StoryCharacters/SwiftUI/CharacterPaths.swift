@@ -535,6 +535,25 @@ enum CharacterPaths {
         return path
     }
 
+    /// Tongue (§3.3) in mouth-local coordinates: the ellipse centred `(0, −h·(1 − 0.45·amount))`, radii
+    /// `(0.55·w, 0.45·h·amount)`, with every boundary point raised by the lips' smile warp
+    /// `lift(x) = smile·0.6·W·((x/w)² − 0.33)` — the MSL evaluates the tongue ellipse at `(x, y − lift(x))`.
+    /// 20 samples, smooth closed spline. Clip it to the mouth when filling.
+    static func tongue(halfWidth w: CGFloat, halfHeight h: CGFloat, amount: CGFloat, smile: CGFloat,
+                       restWidth bigW: CGFloat) -> Path {
+        let n = 20
+        let cy = -h * (1 - 0.45 * amount)
+        let rx = 0.55 * w
+        let ry = max(0.002, 0.45 * h * amount)
+        return closedSpline(count: n) { i in
+            let theta = twoPi * CGFloat(i) / CGFloat(n)
+            let x = rx * cos(theta)
+            let u = w > 1e-6 ? x / w : 0
+            let lift = smile * 0.6 * bigW * (u * u - 0.33)
+            return CGPoint(x: x, y: cy + ry * sin(theta) + lift)
+        }
+    }
+
     // MARK: - Accessories (§3.6)
 
     /// Lumi's robe: teardrop circle r 1.28 at (0, −0.25) with a hood peak at (peakX, 1.38).
@@ -665,6 +684,19 @@ enum CharacterPaths {
     /// Unit disc (radius 1 at the origin): filled through a context transform to draw soft gradient ellipses.
     static func unitDisc() -> Path {
         Path(ellipseIn: CGRect(x: -1, y: -1, width: 2, height: 2))
+    }
+
+    /// Spark's brain centre and base radius (before the `accessory` pulse). It sits at (0, 0.58) with radius 0.27 —
+    /// lower and smaller than the original (0, 0.62)·0.30 — so that, sheared with the swaying drop tip, it stays
+    /// inside the silhouette (≥ 0.04 R margin for tipX ±0.18 including the 1.08 pulse).
+    static let brainCenter = CGPoint(x: 0, y: 0.58)
+    static let brainRadius: CGFloat = 0.27
+
+    /// Unit-space shear that makes the brain follow the `drop` tip sway `tipX` (= 0.18·sin(wiggle)): the MSL drop
+    /// shears by `tipX·smoothstep(0.05, 1.15, y)`; this is that shear linearised about y = 0.58 (value 0.473·tipX,
+    /// slope 1.362·tipX), x' = x + tipX·(1.362·y − 0.317). Error < 0.005 R over the brain.
+    static func brainShear(tipX: CGFloat) -> CGAffineTransform {
+        CGAffineTransform(a: 1, b: 0, c: 1.362 * tipX, d: 1, tx: -0.317 * tipX, ty: 0)
     }
 
     /// Spark's brain: six circles forming two lobes around `center`, overall radius `radius`.

@@ -97,6 +97,40 @@ final class StoryTests: XCTestCase {
                        ["Привет!", "— Кто там?", "— Я.", "Мы ели яблоки и т. д.", "Потом спали."])
     }
 
+    func testPronounImEndsASentence() {
+        let script = StoryScript.parse("[happy][gesture:wave] Я помогаю им. [sad][gesture:nod] Потом спали.",
+                                       title: "T", languageCode: "ru")
+        XCTAssertEqual(script.segments.map { $0.text }, ["Я помогаю им.", "Потом спали."])
+        XCTAssertEqual(script.segments.map { $0.emotion }, [.happy, .sad])
+        XCTAssertEqual(script.segments.map { $0.gesture }, [.wave, .nod])
+    }
+
+    func testTagsBetweenTerminatorAndContinuationKeepTheSentenceTogether() {
+        let directSpeech = StoryScript.parse("[happy] «Пойдём!» [gesture:wave] — позвал зайчик. [sad] Потом пошёл дождь.",
+                                             title: "T", languageCode: "ru")
+        XCTAssertEqual(directSpeech.segments.map { $0.text }, ["«Пойдём!» — позвал зайчик.", "Потом пошёл дождь."])
+        XCTAssertEqual(directSpeech.segments.first?.emotion, .happy)
+        XCTAssertEqual(directSpeech.segments.first?.gesture, .wave)
+        XCTAssertEqual(directSpeech.segments.last?.emotion, .sad)
+        XCTAssertNil(directSpeech.segments.last?.gesture)
+
+        let ellipsis = StoryScript.parse("[curious] Ну... [thinking] а потом пошёл дождь. Конец.", title: "T", languageCode: "ru")
+        XCTAssertEqual(ellipsis.segments.map { $0.text }, ["Ну... а потом пошёл дождь.", "Конец."])
+        XCTAssertEqual(ellipsis.segments.first?.emotion, .thinking)
+
+        // `[br]` still forces a break, and a capitalised sentence after a tag still starts a new segment.
+        let forced = StoryScript.parse("Привет! [br] — сказал он. Конец. [happy] Новый день.", title: "T", languageCode: "ru")
+        XCTAssertEqual(forced.segments.map { $0.text }, ["Привет!", "— сказал он.", "Конец.", "Новый день."])
+    }
+
+    func testLowQuotesCloseWithTheSentence() {
+        let script = StoryScript.parse("„Привет!“ — сказал ёжик. Потом…", title: "T", languageCode: "ru")
+        XCTAssertEqual(script.segments.map { $0.text }, ["„Привет!“ — сказал ёжик.", "Потом…"])
+
+        let english = StoryScript.parse("She said, “Hush.” Then it was quiet.", title: "T", languageCode: "en")
+        XCTAssertEqual(english.segments.map { $0.text }, ["She said, “Hush.”", "Then it was quiet."])
+    }
+
     func testRemovedTagsDoNotLeaveSpacesBeforePunctuation() {
         let script = StoryScript.parse("Hello [happy], friend. Yes [sad] ! «Ну [gesture:nod] » — да.", title: "T", languageCode: "ru")
         XCTAssertEqual(script.segments.map { $0.text }, ["Hello, friend.", "Yes!", "«Ну» — да."])
@@ -133,7 +167,7 @@ final class StoryTests: XCTestCase {
             XCTAssertFalse(story.summary.isEmpty)
             XCTAssertFalse(story.ageRange.isEmpty)
             let script = story.script
-            XCTAssertGreaterThanOrEqual(script.segments.count, 6, story.id)
+            XCTAssertGreaterThanOrEqual(script.segments.count, 8, story.id)
             XCTAssertLessThanOrEqual(script.segments.count, 14, story.id)
             XCTAssertTrue(StoryScript.unknownTags(in: story.tagged).isEmpty, "unknown tags in \(story.id)")
             XCTAssertTrue(script.segments.allSatisfy { !$0.text.isEmpty })
@@ -466,6 +500,111 @@ final class StoryTests: XCTestCase {
         player.skipBackward()  // rewinding a finished story parks it on the last segment
         XCTAssertEqual(player.state, .idle)
         XCTAssertEqual(player.segmentIndex, 1)
+        player.detach()
+    }
+
+    /// A letterless segment ("…") is a silent beat: it is never sent to the speech engine.
+    func testLetterlessSegmentIsNotSpoken() async throws {
+        let rig = CharacterRig(kind: .lumi)
+        let player = StoryPlayer(rig: rig)
+        var spoken: [String] = []
+        player.speakOverride = { text, _ in spoken.append(text) }
+        player.load(Story(id: "b", title: "B", languageCode: "ru", narrator: .lumi, summary: "", ageRange: "3–6",
+                          tagged: "[pause:0] Он замолчал. [pause:0][sad] … [pause:0] Потом пришло утро."))
+        XCTAssertEqual(player.segments.map { $0.text }, ["Он замолчал.", "…", "Потом пришло утро."])
+        player.play()
+        XCTAssertEqual(spoken, ["Он замолчал."])
+        rig.onSpeechEvent?(.finished)
+        try await waitUntil { spoken.count == 2 }
+        XCTAssertEqual(spoken, ["Он замолчал.", "Потом пришло утро."])
+        XCTAssertEqual(player.segmentIndex, 2)
+        XCTAssertEqual(rig.emotion, .sad, "the silent beat still sets its emotion")
+        player.stop()
+        player.detach()
+    }
+
+    /// Skipping or stopping fades out a gesture the player started, so a yawn or a sleep hold does not run on
+    /// into the next sentence.
+    func testTransportCancelsThePlayersGesture() async throws {
+        let rig = CharacterRig(kind: .lumie)
+        let player = StoryPlayer(rig: rig)
+        var spoken: [String] = []
+        player.speakOverride = { text, _ in spoken.append(text) }
+        player.load(Story(id: "c", title: "C", languageCode: "en", narrator: .lumie, summary: "", ageRange: "3–6",
+                          tagged: "[pause:0][sleepy][gesture:yawn] So sleepy. [pause:0] Next one. [pause:0][gesture:sleep] Good night."))
+        player.play()
+        XCTAssertEqual(rig.activeGesture, .yawn)
+        XCTAssertTrue(spoken.isEmpty)
+
+        player.skipForward()   // during the yawn lead-in
+        XCTAssertNil(rig.activeGesture, "the yawn is cancelled")
+        XCTAssertEqual(spoken, ["Next one."])
+
+        rig.onSpeechEvent?(.finished)
+        try await waitUntil { spoken.count == 2 }
+        XCTAssertEqual(spoken.last, "Good night.")
+        rig.onSpeechEvent?(.finished)
+        XCTAssertEqual(rig.activeGesture, .sleep)
+        XCTAssertEqual(player.state, .playing, "the story waits for the sleep gesture")
+
+        player.skipBackward()  // during the sleep hold
+        XCTAssertNil(rig.activeGesture, "the sleep hold is cancelled")
+        XCTAssertEqual(player.segmentIndex, 1)
+        XCTAssertEqual(spoken.last, "Next one.")
+
+        rig.play(.nod)         // a gesture somebody else started is left alone
+        player.stop()
+        XCTAssertEqual(rig.activeGesture, .nod)
+        player.detach()
+    }
+
+    /// The utterance finishing while an engine pause is mirrored counts the sentence; resume moves on.
+    func testFinishDuringSpeechEnginePauseCountsTheSentence() {
+        let rig = CharacterRig(kind: .drop)
+        let player = StoryPlayer(rig: rig)
+        var spoken: [String] = []
+        player.speakOverride = { text, _ in spoken.append(text) }
+        player.load(Story(id: "f", title: "F", languageCode: "en", narrator: .drop, summary: "", ageRange: "3–6",
+                          tagged: "[pause:0] One. [pause:0] Two."))
+        player.play()
+        rig.onSpeechEvent?(.paused)
+        XCTAssertEqual(player.state, .paused)
+        rig.onSpeechEvent?(.finished)
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertTrue(player.isCurrentSegmentSpoken)
+        XCTAssertEqual(player.progress, 0.5, accuracy: 1e-9)
+
+        player.resume()
+        XCTAssertEqual(player.state, .playing)
+        XCTAssertEqual(player.segmentIndex, 1)
+        XCTAssertEqual(spoken, ["One.", "Two."])
+        player.stop()
+        player.detach()
+    }
+
+    /// Detaching a finished story rewinds it, like `play()` from `.finished` would.
+    func testDetachAfterFinishRewinds() async throws {
+        let rig = CharacterRig(kind: .ember)
+        let player = StoryPlayer(rig: rig)
+        var spoken: [String] = []
+        player.speakOverride = { text, _ in spoken.append(text) }
+        player.load(Story(id: "d", title: "D", languageCode: "en", narrator: .ember, summary: "", ageRange: "3–6",
+                          tagged: "[pause:0] One. [pause:0] Two."))
+        player.play()
+        rig.onSpeechEvent?(.finished)
+        try await waitUntil { spoken.count == 2 }
+        rig.onSpeechEvent?(.finished)
+        try await waitUntil { player.state == .finished }
+
+        player.detach()
+        XCTAssertEqual(player.state, .idle)
+        XCTAssertEqual(player.segmentIndex, 0)
+        XCTAssertFalse(player.isCurrentSegmentSpoken)
+        XCTAssertEqual(player.progress, 0, accuracy: 1e-9)
+
+        player.play()
+        XCTAssertEqual(spoken.last, "One.")
+        player.stop()
         player.detach()
     }
 

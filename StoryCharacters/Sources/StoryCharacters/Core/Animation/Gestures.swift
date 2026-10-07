@@ -8,17 +8,23 @@ import Foundation
 public struct GestureClip: Sendable, Equatable {
     public let gesture: Gesture
     public let duration: TimeInterval
+    /// False for designs without `.arms`: arm-led gestures (the wave) move the body and the accessories instead.
+    public let hasArms: Bool
 
-    /// - Parameter energy: the current emotion's energy; lively characters perform gestures a bit faster.
-    public init(gesture: Gesture, energy: Float = 0.5) {
+    /// - Parameters:
+    ///   - energy: the current emotion's energy; lively characters perform gestures a bit faster.
+    ///   - hasArms: whether the design draws arms (`DesignFeatures.arms`).
+    public init(gesture: Gesture, energy: Float = 0.5, hasArms: Bool = true) {
         self.gesture = gesture
         let e = min(max(energy, 0), 1)
         self.duration = gesture.nominalDuration * Double(1.15 - 0.3 * e)
+        self.hasArms = hasArms
     }
 
-    public init(gesture: Gesture, duration: TimeInterval) {
+    public init(gesture: Gesture, duration: TimeInterval, hasArms: Bool = true) {
         self.gesture = gesture
         self.duration = max(0.05, duration)
+        self.hasArms = hasArms
     }
 
     /// Additive delta at normalized time `u` (0 = start, 1 = end). Zero outside 0…1.
@@ -64,11 +70,17 @@ public struct GestureClip: Sendable, Equatable {
             d.face.mouth.open = 0.1 * air
 
         case .wave:
-            // Right arm up and rocking; the whole body sways along (designs without arms still sway).
+            // Right arm up and rocking; the whole body sways along. Designs without arms rock the body twice as far
+            // and flourish their accessory instead (Lumi's wand lights up, a flame's inner core flares).
             let raise = RigCurves.plateau(u, attack: 0.2, release: 0.25)
             let rock = RigCurves.wave(u, cycles: 3.5)
-            d.body.armR = 0.9 * raise + 0.15 * rock
-            d.body.tilt = 0.06 * rock
+            if hasArms {
+                d.body.armR = 0.9 * raise + 0.15 * rock
+                d.body.tilt = 0.06 * rock
+            } else {
+                d.body.tilt = 0.12 * rock
+                d.body.accessory2 = 0.6 * raise
+            }
             d.face.headTilt = 0.10 * raise + 0.04 * rock
             d.face.mouth.smile = 0.25 * raise
             d.face.mouth.open = 0.05 * raise
@@ -137,15 +149,18 @@ public struct GestureClip: Sendable, Equatable {
             d.body.armR = 0.4 * hold
 
         case .celebrate:
-            // Two hops, a wiggle "spin", arms up, sparkle bursts and hearts.
+            // Anticipation squash, two hops, a wiggle "spin", arms up, sparkle bursts and hearts.
+            let anticipation = RigCurves.bump(u, center: 0.06, width: 0.12)
             let hop1 = RigCurves.bump(u, center: 0.28, width: 0.36)
             let hop2 = RigCurves.bump(u, center: 0.68, width: 0.36)
             let hops = hop1 + hop2
             let spin = RigCurves.wave(u, cycles: 1.5)
             d.body.offsetY = 0.28 * hops
             d.body.bounce = min(1, hops)
-            d.body.scaleY = 0.08 * hops - 0.06 * RigCurves.bump(u, center: 0.48, width: 0.12) - 0.06 * RigCurves.bump(u, center: 0.9, width: 0.16)
-            d.body.scaleX = -0.05 * hops
+            let landing1 = RigCurves.bump(u, center: 0.48, width: 0.12)
+            let landing2 = RigCurves.bump(u, center: 0.9, width: 0.16)
+            d.body.scaleY = 0.08 * hops - 0.08 * anticipation - 0.06 * landing1 - 0.06 * landing2
+            d.body.scaleX = -0.05 * hops + 0.06 * anticipation
             d.body.tilt = 0.25 * spin
             d.body.armL = 1.0 * env
             d.body.armR = 1.0 * env
@@ -185,8 +200,11 @@ public struct GestureClip: Sendable, Equatable {
             d.face.mouth.width = -0.3 * yawn
             d.face.mouth.smile = -0.1 * yawn
             d.face.mouth.tongue = 0.2 * yawn
-            d.face.eyeOpenL = -0.9 * yawn
-            d.face.eyeOpenR = -0.9 * yawn
+            // −1.3 shuts even wide (1.3) eyes; the squint closes the last sliver of iris.
+            d.face.eyeOpenL = -1.3 * yawn
+            d.face.eyeOpenR = -1.3 * yawn
+            d.face.lowerLidL = 0.3 * yawn
+            d.face.lowerLidR = 0.3 * yawn
             d.face.browRaiseL = 0.3 * yawn
             d.face.browRaiseR = 0.3 * yawn
             d.face.browTiltL = 0.3 * yawn

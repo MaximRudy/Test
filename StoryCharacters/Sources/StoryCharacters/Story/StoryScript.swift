@@ -41,7 +41,8 @@ public struct StorySegment: Sendable, Equatable, Identifiable {
 /// Sentences are split on `.`, `!`, `?` and `…` (runs such as `?!` or `...` and closing quotes stay
 /// with the sentence; a `.` between two digits is a decimal point, not a terminator). A run does not end
 /// the sentence when the text goes on with a lowercase letter, or with a dash and a lowercase letter
-/// («Привет!» — сказал ёжик; "Ну... а потом"), or when the `.` closes a known abbreviation ("Mr. Fox").
+/// («Привет!» — сказал ёжик; "Ну... а потом"), also when tags sit in between («Пойдём!» [gesture:wave] — позвал
+/// зайчик), or when the `.` closes a known abbreviation ("Mr. Fox").
 /// Punctuation left detached by a removed tag is glued back ("Hello [happy], friend." → "Hello, friend."). Tags apply to the
 /// segment that follows them — i.e. to the next segment that is produced after the tag — so
 /// `[sad] It rained.` makes "It rained." sad and `[pause:1] Goodnight.` keeps one second of silence
@@ -309,17 +310,35 @@ struct StoryTagScanner {
 
     /// True when the text after a terminator run (starting at `position`) clearly continues the same
     /// sentence: the next visible character is a lowercase letter ("Ну... а потом", "в 1999 г. летом"),
-    /// or a dash followed by a lowercase letter (direct speech: «Привет!» — сказал ёжик).
+    /// or a dash followed by a lowercase letter (direct speech: «Привет!» — сказал ёжик). Tags in between
+    /// are looked through («Пойдём!» [gesture:wave] — позвал зайчик), so they apply to the whole sentence.
     private func continuesSentence(from position: Int) -> Bool {
-        var i = position
-        while i < chars.count && chars[i].isWhitespace { i += 1 }
+        let i = skipWhitespaceAndTags(from: position)
         guard i < chars.count else { return false }
         let next = chars[i]
         if next.isLowercase { return true }
         guard StoryTagScanner.isDash(next) else { return false }
-        var j = i + 1
-        while j < chars.count && chars[j].isWhitespace { j += 1 }
+        let j = skipWhitespaceAndTags(from: i + 1)
         return j < chars.count && chars[j].isLowercase
+    }
+
+    /// Index of the first character at or after `position` that is neither whitespace nor a tag the scanner
+    /// removes from the text. A `[br]` tag stops the skip: it ends the segment anyway.
+    private func skipWhitespaceAndTags(from position: Int) -> Int {
+        var i = position
+        while i < chars.count {
+            if chars[i].isWhitespace {
+                i += 1
+                continue
+            }
+            if chars[i] == "[", let close = tagClose(from: i),
+               let tag = StoryTag(content: String(chars[(i + 1)..<close])), tag != .lineBreak {
+                i = close + 1
+                continue
+            }
+            break
+        }
+        return i
     }
 
     /// True when the punctuation run that starts at `runStart` in `buffer` is a single `.` closing a known
@@ -335,18 +354,22 @@ struct StoryTagScanner {
 
     /// Words that are followed by a period without ending the sentence. Single-letter Russian abbreviations
     /// ("т. е.", "г.") are not listed: they are normally followed by a lowercase word, which already keeps
-    /// the sentence together, while "и т. д. Потом…" must still split.
+    /// the sentence together, while "и т. д. Потом…" must still split. «им.» (= «имени») is not listed either:
+    /// «им» is a common pronoun that often ends a sentence ("Я помогаю им. Потом…").
     static let abbreviations: Set<String> = [
         "mr", "mrs", "ms", "dr", "st", "prof", "mt",
-        "ул", "им", "св", "проф",
+        "ул", "св", "проф",
     ]
 
     static func isTerminator(_ c: Character) -> Bool {
         c == "." || c == "!" || c == "?" || c == "…"
     }
 
+    /// Closing quotes and brackets that stay with the sentence they close. “ and › close the Russian
+    /// „…“ and ‹…› quotes; only marks directly after the terminator are taken, so an English opening “
+    /// after a space is not affected.
     static func isClosingQuote(_ c: Character) -> Bool {
-        c == "»" || c == "\"" || c == "”" || c == "’" || c == "'" || c == ")"
+        c == "»" || c == "\"" || c == "”" || c == "“" || c == "’" || c == "›" || c == "'" || c == ")"
     }
 
     static func isDash(_ c: Character) -> Bool {

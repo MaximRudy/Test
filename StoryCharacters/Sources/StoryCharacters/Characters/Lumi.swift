@@ -9,7 +9,8 @@ extension CharacterCatalog {
     /// Layout notes: the star's inner radius is only 0.52, so the face is compact and centred — eyes close
     /// together and low, a small mouth just below them, cheeks tucked into the lower star notches.
     /// The brows sit directly under the upper notches (inner vertices at (±0.306, 0.421)), so they are short,
-    /// thin and low (browY 0.29): even the surprised raise (+0.108) keeps them inside the silhouette.
+    /// thin and low (browY 0.29): curious, excited and scared raises keep them inside the silhouette, and even the
+    /// surprised raise (+0.108) leaves only about 6 % of the upward-bent middle at the notch edge.
     /// Idle: hood sway (`wiggle`), book glow breathing (`accessory`), wand sparkles (`accessory2`), gentle float.
     /// Signature (Core): `.thinking` taps the wand to the chin (accessory2 pulses); `.excited` flares the star tips (glow 1.6).
     public static let lumi: CharacterDesign = CharacterDesign(

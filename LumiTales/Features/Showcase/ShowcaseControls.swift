@@ -46,12 +46,26 @@ struct RendererControl: View {
 // MARK: - Emotions
 
 /// 14 emotion buttons plus an intensity slider. Selection mirrors `rig.emotion`.
+/// The column count drops as Dynamic Type grows so long names (e.g. "Задумчивость") stay readable
+/// within the captions' 0.7 minimum scale instead of truncating.
 struct EmotionGrid: View {
     let rig: CharacterRig
     @Binding var intensity: Float
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var columnCount: Int {
+        if dynamicTypeSize >= .accessibility1 {
+            return 2
+        }
+        if dynamicTypeSize >= .xxLarge {
+            return 3
+        }
+        return 4
+    }
+
     var body: some View {
-        let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: columnCount)
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Label(L10n.emotions, systemImage: "theatermasks")
@@ -108,14 +122,14 @@ struct EmotionButton: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
             .padding(.horizontal, 4)
-            .background(
+            .background {
                 RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
                     .fill(isSelected ? AppTheme.accent.opacity(0.28) : Color.white.opacity(0.07))
-            )
-            .overlay(
+            }
+            .overlay {
                 RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
                     .strokeBorder(isSelected ? AppTheme.accent : Color.clear, lineWidth: 1.5)
-            )
+            }
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? AppTheme.accent : Color.white)
@@ -200,14 +214,14 @@ struct GestureChip: View {
                 .lineLimit(1)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(
+                .background {
                     Capsule()
                         .fill(isActive ? AppTheme.accent.opacity(0.3) : Color.white.opacity(0.08))
-                )
-                .overlay(
+                }
+                .overlay {
                     Capsule()
                         .strokeBorder(isActive ? AppTheme.accent : Color.clear, lineWidth: 1.5)
-                )
+                }
         }
         .buttonStyle(.plain)
         .foregroundStyle(isActive ? AppTheme.accent : Color.white)

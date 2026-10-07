@@ -153,23 +153,71 @@ final class CoreAnimationTests: XCTestCase {
     // MARK: - Gestures
 
     func testGestureClipsStartAndEndAtZeroDelta() {
-        for gesture in Gesture.allCases {
-            let clip = GestureClip(gesture: gesture)
-            XCTAssertEqual(maxAbs(clip.evaluate(u: 0)), 0, accuracy: 1e-6, "\(gesture) at u = 0")
-            XCTAssertEqual(maxAbs(clip.evaluate(u: 1)), 0, accuracy: 1e-6, "\(gesture) at u = 1")
-            // C¹ start/end: the delta must still be tiny a few milliseconds in.
-            XCTAssertLessThan(maxAbs(clip.evaluate(u: 0.005)), 0.05, "\(gesture) near u = 0")
-            XCTAssertLessThan(maxAbs(clip.evaluate(u: 0.995)), 0.05, "\(gesture) near u = 1")
-            XCTAssertGreaterThan(clip.duration, 0)
-            // The clip actually does something.
-            var peak: Float = 0
-            var u: Float = 0.02
-            while u < 1 {
-                peak = max(peak, maxAbs(clip.evaluate(u: u)))
-                u += 0.02
+        for hasArms in [true, false] {
+            for gesture in Gesture.allCases {
+                let clip = GestureClip(gesture: gesture, hasArms: hasArms)
+                let name = "\(gesture) (hasArms: \(hasArms))"
+                XCTAssertEqual(maxAbs(clip.evaluate(u: 0)), 0, accuracy: 1e-6, "\(name) at u = 0")
+                XCTAssertEqual(maxAbs(clip.evaluate(u: 1)), 0, accuracy: 1e-6, "\(name) at u = 1")
+                // C¹ start/end: the delta must still be tiny a few milliseconds in.
+                XCTAssertLessThan(maxAbs(clip.evaluate(u: 0.005)), 0.05, "\(name) near u = 0")
+                XCTAssertLessThan(maxAbs(clip.evaluate(u: 0.995)), 0.05, "\(name) near u = 1")
+                XCTAssertGreaterThan(clip.duration, 0)
+                // The clip actually does something.
+                var peak: Float = 0
+                var u: Float = 0.02
+                while u < 1 {
+                    peak = max(peak, maxAbs(clip.evaluate(u: u)))
+                    u += 0.02
+                }
+                XCTAssertGreaterThan(peak, 0.05, "\(name) should move the character")
             }
-            XCTAssertGreaterThan(peak, 0.05, "\(gesture) should move the character")
         }
+    }
+
+    func testArmlessWaveYawnAndCelebrateDetails() {
+        // Designs without arms rock further and flourish their accessory instead of raising an invisible arm.
+        let armless = GestureClip(gesture: .wave, duration: 1.6, hasArms: false)
+        let armed = GestureClip(gesture: .wave, duration: 1.6)
+        XCTAssertEqual(armless.evaluate(u: 0.5).body.armR, 0)
+        XCTAssertGreaterThan(armless.evaluate(u: 0.5).body.accessory2, 0.5)
+        XCTAssertGreaterThan(armed.evaluate(u: 0.5).body.armR, 0.6)
+        XCTAssertEqual(armed.evaluate(u: 0.5).body.accessory2, 0)
+        var swayArmless: Float = 0
+        var swayArmed: Float = 0
+        var u: Float = 0.01
+        while u < 1 {
+            swayArmless = max(swayArmless, abs(armless.evaluate(u: u).body.tilt))
+            swayArmed = max(swayArmed, abs(armed.evaluate(u: u).body.tilt))
+            u += 0.01
+        }
+        XCTAssertGreaterThan(swayArmless, 1.5 * swayArmed)
+
+        // The yawn shuts even wide-open eyes.
+        let yawn = GestureClip(gesture: .yawn, duration: 2.6).evaluate(u: 0.5)
+        XCTAssertLessThanOrEqual(1.3 + yawn.face.eyeOpenL, 1e-5)
+        XCTAssertLessThanOrEqual(1.3 + yawn.face.eyeOpenR, 1e-5)
+        XCTAssertGreaterThan(yawn.face.lowerLidL, 0.2)
+
+        // Celebrate squashes in anticipation before the first hop.
+        let anticipation = GestureClip(gesture: .celebrate, duration: 1.8).evaluate(u: 0.06)
+        XCTAssertLessThan(anticipation.body.scaleY, -0.05)
+        XCTAssertGreaterThan(anticipation.body.scaleX, 0.03)
+    }
+
+    func testRigRetargetsWaveForArmlessDesigns() {
+        let rig = makeRig(RigConfiguration(respectsReduceMotion: false))   // the test design has no `.arms`
+        rig.isBlinkingEnabled = false
+        var time: TimeInterval = 0
+        rig.pose(at: time)
+        rig.play(.wave)   // 1.6 s at neutral energy
+        for _ in 0..<60 {
+            time += 1.0 / 60.0
+            rig.pose(at: time)
+        }
+        XCTAssertEqual(rig.activeGesture, .wave)
+        XCTAssertLessThan(abs(rig.currentPose.body.armR), 0.05)
+        XCTAssertGreaterThan(rig.currentPose.body.accessory2, 0.7)
     }
 
     func testGesturePlayerCrossFadesAndFinishes() {
@@ -283,6 +331,99 @@ final class CoreAnimationTests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(switchedAt, 0, "a blink must happen")
         XCTAssertLessThan(maxDrop, 0.02, "the lids must not re-close after the heaviness change")
+    }
+
+    // MARK: - Gaze, speech animator
+
+    func testGazeSaccadesDartInsteadOfGliding() {
+        var gaze = GazeController(seed: 4)
+        let dt: Float = 1.0 / 1000.0
+        var t: Float = 0
+        var previous = gaze.update(time: 0, dt: 0, restGaze: .zero, gazeWander: 1, cameraBias: 0,
+                                   lookTarget: nil, isSpeaking: false, energy: 0.5, extraOffset: .zero)
+        var fastRun: Float = 0
+        var longestFastRun: Float = 0
+        var saccades = 0
+        while t < 12 {
+            t += dt
+            let g = gaze.update(time: t, dt: dt, restGaze: .zero, gazeWander: 1, cameraBias: 0,
+                                lookTarget: nil, isSpeaking: false, energy: 0.5, extraOffset: .zero)
+            XCTAssertLessThanOrEqual(abs(g.x), 1)
+            XCTAssertLessThanOrEqual(abs(g.y), 1)
+            let speed = gap(g, previous) / dt
+            if speed > 1 {
+                if fastRun == 0 { saccades += 1 }
+                fastRun += dt
+                longestFastRun = max(longestFastRun, fastRun)
+            } else {
+                fastRun = 0
+            }
+            previous = g
+        }
+        XCTAssertGreaterThan(saccades, 0, "the eyes must wander on their own")
+        XCTAssertLessThan(longestFastRun, 0.075, "a saccade darts in ≈ 60 ms instead of gliding")
+    }
+
+    func testGazeLookTargetHandOffIsContinuous() {
+        let frame: Float = 1.0 / 60.0
+        let target = SIMD2<Float>(0.8, 0.6)
+        // Fresh controllers schedule their first saccade ≥ 1 s in, so only the hand-off moves the eyes here.
+        for followFrames in [30, 3] {
+            var gaze = GazeController(seed: 4)
+            var t: Float = 0
+            var last = gaze.update(time: 0, dt: 0, restGaze: .zero, gazeWander: 1, cameraBias: 0,
+                                   lookTarget: nil, isSpeaking: false, energy: 0.5, extraOffset: .zero)
+            var maxStepAfterRelease: Float = 0
+            for i in 0..<(followFrames + 24) {
+                t += frame
+                let following = i < followFrames
+                let g = gaze.update(time: t, dt: frame, restGaze: .zero, gazeWander: 1, cameraBias: 0,
+                                    lookTarget: following ? target : nil, isSpeaking: false, energy: 0.5,
+                                    extraOffset: .zero)
+                if i == followFrames - 1 && followFrames >= 30 {
+                    XCTAssertEqual(g.x, target.x, accuracy: 0.05)
+                    XCTAssertEqual(g.y, target.y, accuracy: 0.05)
+                }
+                if !following { maxStepAfterRelease = max(maxStepAfterRelease, gap(g, last)) }
+                last = g
+            }
+            // Converged: the eyes stay put. Mid-flight: they keep moving smoothly, never snap.
+            XCTAssertLessThan(maxStepAfterRelease, followFrames >= 30 ? 0.03 : 0.2, "follow frames: \(followFrames)")
+        }
+    }
+
+    func testSpeechAnimatorClosesOpenRestingMouthInPausesAndKeepsSmile() {
+        var animator = SpeechAnimator()
+        let dt: Float = 1.0 / 60.0
+        func run(_ sample: LipSyncSample, resting: MouthShape, frames: Int) -> MouthShape {
+            var result = resting
+            for _ in 0..<frames {
+                var pose = CharacterPose.neutral
+                pose.face.mouth = resting
+                animator.apply(sample: sample, headMotion: 1, dt: dt, to: &pose)
+                result = pose.face.mouth
+            }
+            return result
+        }
+        let pause = LipSyncSample(mouth: .zero, energy: 0, isSpeaking: true, wordOnset: 0)
+
+        // Surprised rests with the jaw dropped; inside an utterance the pauses still read as closed.
+        let surprised = EmotionProfile.profile(for: .surprised).face.mouth
+        let paused = run(pause, resting: surprised, frames: 45)
+        XCTAssertLessThan(paused.open, 0.2)
+        XCTAssertLessThan(paused.round, 0.3)
+        // Once the utterance is over the resting mouth comes back.
+        let after = run(.silent, resting: surprised, frames: 90)
+        XCTAssertEqual(after.open, surprised.open, accuracy: 0.02)
+
+        // Smiles persist while talking and in pauses.
+        let happy = EmotionProfile.profile(for: .happy).face.mouth
+        let talking = run(LipSyncSample(mouth: Viseme.aa.shape, energy: 0.9, isSpeaking: true, wordOnset: 0),
+                          resting: happy, frames: 30)
+        XCTAssertGreaterThan(talking.open, 0.8)
+        XCTAssertGreaterThan(talking.smile, 0.3)
+        let happyPause = run(pause, resting: happy, frames: 30)
+        XCTAssertEqual(happyPause.smile, happy.smile, accuracy: 0.02)
     }
 
     func testBlinkSuppressionReopensBlinkInFlight() {
@@ -611,6 +752,12 @@ final class CoreAnimationTests: XCTestCase {
                                features: [.hood, .bookAndWand, .starPattern, .floats],
                                idle: IdleStyle(floatAmplitude: 0.03, floatFrequency: 0.8),
                                personality: Personality(energy: 0.5, shyness: 0.2, curiosity: 0.7, playfulness: 0.5))
+    }
+
+    /// Euclidean distance between two gaze vectors.
+    private func gap(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
+        let d = a - b
+        return (d.x * d.x + d.y * d.y).squareRoot()
     }
 
     private func maxAbs(_ pose: CharacterPose) -> Float {

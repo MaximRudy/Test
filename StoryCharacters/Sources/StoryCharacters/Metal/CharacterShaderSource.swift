@@ -5,8 +5,8 @@ import Foundation
 /// compiles this source at runtime (`MTLDevice.makeLibrary(source:options:)`).
 ///
 /// The text below is byte-identical to `Metal/Shaders/CharacterShaders.metal` (enforced by
-/// `tools/check.py` and `MetalShaderTests`). Edit the `.metal` file and regenerate this one;
-/// never edit the string by hand.
+/// `tools/check.py` and `MetalShaderTests`); the blank line before the closing delimiter keeps the file's
+/// final newline. Edit the `.metal` file and regenerate this one; never edit the string by hand.
 public enum CharacterShaderSource {
     /// Metal Shading Language source of the character and sparkle pipelines.
     public static let msl: String = #"""
@@ -144,6 +144,18 @@ static inline float sdEllipse(float2 p, float2 c, float2 r) {
     return (length(q) - 1.0) * min(r.x, r.y);
 }
 
+// Ellipse distance normalised by the gradient of the implicit function: close to metric even for very flat
+// ellipses, where sdEllipse underestimates along the long axis by r.y / r.x and smears the ends.
+static inline float sdEllipseGrad(float2 p, float2 c, float2 r) {
+    float2 q = p - c;
+    float k0 = length(q / r);
+    if (k0 < 1e-3) {
+        return -min(r.x, r.y);
+    }
+    float k1 = length(q / (r * r));
+    return k0 * (k0 - 1.0) / k1;
+}
+
 static inline float sdBox(float2 p, float2 c, float2 he) {
     float2 d = abs(p - c) - he;
     return length(max(d, float2(0.0))) + min(max(d.x, d.y), 0.0);
@@ -205,6 +217,20 @@ static inline float sdStar4(float2 p, float r) {
     float2 q = abs(p) / rr;
     float s = sqrt(q.x) + sqrt(q.y);
     return (s - 1.0) * rr * 0.5;
+}
+
+// Sparkle sprite, the Canvas CharacterPaths.addStar4 polygon: four tips at distance 1 on the axes, inner vertices at
+// 0.36 on the diagonals (unit = the sparkle size). Exact distance, folded into the octant 0 <= y <= x.
+static inline float sdSparkleStar(float2 p) {
+    p = abs(p);
+    if (p.y > p.x) {
+        p = p.yx;
+    }
+    float2 pa = p - float2(1.0, 0.0);
+    float2 ba = float2(0.254558441, 0.254558441) - float2(1.0, 0.0);
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    float d = length(pa - ba * h);
+    return (ba.x * pa.y - ba.y * pa.x > 0.0) ? -d : d;
 }
 
 // Heart with its tip at the origin and lobes reaching y = 1 (unit size).
@@ -282,13 +308,14 @@ static inline float sdHood(float2 q) {
     return d;
 }
 
-// Cloud: union of five circles, flattened below y = -0.70.
+// Cloud (§3.5): exact union of five circles (sharp creases between the lobes, like the Canvas
+// CharacterPaths.cloudBody), flattened below y = -0.70.
 static inline float sdCloud(float2 q) {
     float d = sdCircle(q, float2(0.0, 0.0), 0.75);
-    d = smin(d, sdCircle(q, float2(-0.55, -0.10), 0.55), 0.08);
-    d = smin(d, sdCircle(q, float2(0.55, -0.10), 0.55), 0.08);
-    d = smin(d, sdCircle(q, float2(-0.25, 0.35), 0.50), 0.08);
-    d = smin(d, sdCircle(q, float2(0.30, 0.40), 0.48), 0.08);
+    d = min(d, sdCircle(q, float2(-0.55, -0.10), 0.55));
+    d = min(d, sdCircle(q, float2(0.55, -0.10), 0.55));
+    d = min(d, sdCircle(q, float2(-0.25, 0.35), 0.50));
+    d = min(d, sdCircle(q, float2(0.30, 0.40), 0.48));
     d = max(d, -0.70 - q.y);
     return d;
 }
@@ -393,14 +420,18 @@ static float4 drawEye(float4 acc, float2 f, float side, float eyeOpen, float low
     float2 lp = f - c;
     if (o < 0.04 || top - bot < 0.02) {
         // Closed or squeezed-shut eye (blink, wink, laughing, sleep): a lash line where the lids meet.
-        // Same curve as the Canvas renderer: quadratic from (-0.9 rx, lineY + 0.02) to (+0.9 rx, lineY + 0.02)
-        // with control (0, lineY - 0.06), i.e. y = lineY + 0.02 - 0.04 (1 - xn^2); width 0.035, round caps,
-        // brow colour (outline, alpha 0.9).
+        // Same curve as the Canvas renderer: quadratic from (-0.9 rx, y0) to (+0.9 rx, y0) whose middle sits at
+        // y0 + amp, i.e. y = y0 + amp (1 - xn^2); width 0.035, round caps, brow colour (outline, alpha 0.9).
+        // A relaxed closure (blink, sleep, wink) sags into a cup (amp -0.04); a cheek-squeezed one (laughing,
+        // giggle: lowerLid >= 0.45) blends into the happy arch (amp +0.05).
         float lineY = (o < 0.04) ? (-0.2 * ryo) : (0.5 * (top + bot));
+        float happy = smoothstep(0.45, 0.85, clamp(lowerLid, 0.0, 1.0));
+        float amp = -0.04 + 0.09 * happy;
+        float y0 = lineY + 0.02 - 0.04 * happy;
         float hx = 0.9 * rx;
         float xn = clamp(lp.x / hx, -1.0, 1.0);
-        float curveY = lineY + 0.02 - 0.04 * (1.0 - xn * xn);
-        float slope = (abs(lp.x) < hx) ? (0.08 * xn / hx) : 0.0;
+        float curveY = y0 + amp * (1.0 - xn * xn);
+        float slope = (abs(lp.x) < hx) ? (-2.0 * amp * xn / hx) : 0.0;
         float dy = (lp.y - curveY) / sqrt(1.0 + slope * slope);
         float dl = length(float2(max(abs(lp.x) - hx, 0.0), dy)) - 0.0175;
         return blendOver(acc, u.colOutline.rgb, fillAA(dl, aa) * 0.9 * clip);
@@ -576,12 +607,15 @@ static float4 drawArms(float4 acc, float2 q, float dBody, float aa, constant Cha
     return blendOver(acc, col, fillAA(d, aa));
 }
 
-// Robe colour: accent, darker towards the bottom and the rim (the caller darkens the hood interior).
+// Robe colour: accent lifted to x1.45 at the hood, darker (x0.72) towards the hem, back-lit by an accent2 rim light
+// within 0.10 of the edge so the dark robe keeps its silhouette on the night-sky backgrounds (the Canvas renderer
+// strokes the same accent2 rim inside the robe outline). The caller darkens the hood interior (x0.45).
 static float3 robeColor(float2 q, float dRobe, constant CharacterUniforms& u) {
     float t = clamp(q.y * 0.4 + 0.6, 0.0, 1.0);
-    float3 col = mix(u.colAccent.rgb * 0.72, u.colAccent.rgb, t);
+    float3 col = mix(u.colAccent.rgb * 0.72, min(u.colAccent.rgb * 1.45, float3(1.0)), t);
     float rim = clamp((dRobe + 0.10) / 0.10, 0.0, 1.0);
-    col *= (1.0 - 0.35 * rim * rim);
+    col *= (1.0 - 0.20 * rim);
+    col = mix(col, u.colAccent2.rgb, 0.60 * rim * rim * rim);
     return col;
 }
 
@@ -620,13 +654,17 @@ static float4 drawInnerFlame(float4 acc, float2 q, float wig, float swell, float
 }
 
 // Spark's brain (§3.6): the Canvas CharacterPaths.brain lobes and brainGrooves curves. `bp` is the brain frame in which
-// the Canvas coordinates apply directly (overall radius 0.30, scaled by k = 1 + 0.08 accessory about (0, 0.62)); the
-// figure is mirror-symmetric, so the right-hand lobes and curls are evaluated at (|x|, y).
-static float4 drawBrain(float4 acc, float2 q, float aa, constant CharacterUniforms& u) {
+// the Canvas coordinates apply directly: centre (0, 0.58), base radius 0.27 = 0.9 x the 0.30 design radius, scaled by
+// the pulse 1 + 0.08 accessory, so k = 0.9 (1 + 0.08 accessory). On a drop body (tipX = 0.18 sin(wiggle), else 0) the
+// brain is sheared with the swaying tip exactly like sdDrop (Canvas: CharacterPaths.brainShear, its linearisation), so
+// it rides on the head instead of poking out of the silhouette. The figure is mirror-symmetric, so the right-hand lobes
+// and curls are evaluated at (|x|, y).
+static float4 drawBrain(float4 acc, float2 q, float tipX, float aa, constant CharacterUniforms& u) {
     float a = clamp(u.armsAccessory.z, 0.0, 1.0);
-    float k = 1.0 + 0.08 * a;
-    float2 c = float2(0.0, 0.62);
-    float2 bp = (q - c) / k;
+    float k = (1.0 + 0.08 * a) * 0.9;
+    float2 c = float2(0.0, 0.58);
+    float2 qs = float2(q.x - tipX * smoothstep(0.05, 1.15, q.y), q.y);
+    float2 bp = (qs - c) / k;
     float2 m = float2(abs(bp.x), bp.y);
     float db = sdCircle(m, float2(0.13, 0.03), 0.165);
     db = smin(db, sdCircle(m, float2(0.21, -0.06), 0.115), 0.02);
@@ -648,8 +686,9 @@ static float4 drawBrain(float4 acc, float2 q, float aa, constant CharacterUnifor
     col = mix(col, u.colAccent2.rgb, fillAA(g * k - 0.0125, aa));
     float rim = clamp((d + 0.04) / 0.04, 0.0, 1.0);
     col = mix(col, u.colAccent2.rgb * 0.8, 0.5 * rim * rim);
-    // Pulse glow: radial halo of radius 1.7 x the brain radius, alpha 0.6 accessory (Canvas accent2 glow gradient).
-    float glow = a * 0.6 * radialFalloff(length(q - c), 0.30 * k * 1.7, 0.45, 0.4);
+    // Pulse glow: radial halo of radius 1.7 x the brain radius 0.27 (1 + 0.08 accessory), measured in the sheared frame
+    // like the Canvas halo, alpha 0.6 accessory (Canvas accent2 glow gradient).
+    float glow = a * 0.6 * radialFalloff(length(qs - c), 0.30 * k * 1.7, 0.45, 0.4);
     acc = blendOver(acc, u.colAccent2.rgb, glow);
     return blendOver(acc, col, fillAA(d, aa));
 }
@@ -720,16 +759,14 @@ static float4 drawBookAndWand(float4 acc, float2 q, float aa, constant Character
     float a1 = clamp(u.armsAccessory.z, 0.0, 1.0);
     float a2 = clamp(u.armsAccessory.w, 0.0, 1.0);
     // Book: rounded rect 0.50 x 0.38, corner 0.06, at (-0.98, -0.45) rotated 15 degrees.
+    // Flat palette.accent2 cover (§3.6) like the Canvas book.
     float2 bc = float2(-0.98, -0.45);
     float2 lp = rot(q - bc, -0.2618);
     float dCover = sdRoundBox(lp, float2(0.0), float2(0.25, 0.19), 0.06);
     float starA = 0.5 + 0.5 * a1;
-    float3 col = mix(u.colAccent2.rgb * 0.7, u.colAccent2.rgb, clamp(lp.y * 2.0 + 0.6, 0.0, 1.0));
-    float rim = clamp((dCover + 0.04) / 0.04, 0.0, 1.0);
-    col = mix(col, u.colOutline.rgb, 0.4 * rim * rim);
     // Page edge: rounded rect 0.05 x 0.32, corner 0.015, at (0.215, 0) in palette.teeth (Canvas pageEdge).
     float dEdge = sdRoundBox(lp, float2(0.215, 0.0), float2(0.025, 0.16), 0.015);
-    col = mix(col, u.colTeeth.rgb, fillAA(dEdge, aa));
+    float3 col = mix(u.colAccent2.rgb, u.colTeeth.rgb, fillAA(dEdge, aa));
     acc = blendOver(acc, col, fillAA(dCover, aa));
     // Cover star like the Canvas book: a soft glow halo of radius 0.24 around the star (glow gradient 1, 0.45 at 0.4, 0),
     // then the 4-point star (radius 0.09, upright: only its centre follows the book) in palette.highlight, both at
@@ -738,16 +775,9 @@ static float4 drawBookAndWand(float4 acc, float2 q, float aa, constant Character
     acc = blendOver(acc, u.colGlow.rgb, starA * radialFalloff(length(q - sc), 0.24, 0.4, 0.45));
     float dStar = sdStar4(q - sc, 0.09);
     acc = blendOver(acc, u.colHighlight.rgb, starA * fillAA(dStar, aa));
-    // Wand: capsule (0.85,-0.30) -> (1.25,0.35), radius 0.05, star at the tip.
-    float2 wa = float2(0.85, -0.30);
-    float2 wb = float2(1.25, 0.35);
-    float dW = sdCapsule(q, wa, wb, 0.05);
-    float2 dir = normalize(wb - wa);
-    float2 nrm = float2(-dir.y, dir.x);
-    float off = dot(q - wa, nrm);
-    float3 wcol = u.colShadow.rgb;
-    wcol = mix(wcol, u.colHighlight.rgb, 0.35 * fillAA(abs(off - 0.02) - 0.012, aa));
-    acc = blendOver(acc, wcol, fillAA(dW, aa));
+    // Wand: capsule (0.85,-0.30) -> (1.25,0.35), radius 0.05, flat palette.shadow (Canvas wandColor), star at the tip.
+    float dW = sdCapsule(q, float2(0.85, -0.30), float2(1.25, 0.35), 0.05);
+    acc = blendOver(acc, u.colShadow.rgb, fillAA(dW, aa));
     // Tip: 4-point star at (1.28, 0.40) in the highlight colour, radius 0.11 + 0.03 accessory2. The glow
     // (alpha = accessory2) is a finite radial halo of radius 0.28 measured with a metric distance, so it
     // never reaches the early-out contour (same gradient as the Canvas renderer).
@@ -760,19 +790,15 @@ static float4 drawBookAndWand(float4 acc, float2 q, float aa, constant Character
 
 // MARK: - Dome (world space `p`, so the jar does not move with the body)
 
+// Wooden base (§3.6), shaded like the Canvas drawDomeBase: rounded box 3.40 x 0.50 (corner 0.12) at y = -1.55 with a
+// vertical gradient from accent (y = -1.30) to accent darkened 35 % (y = -1.80), and a flat nameplate 1.10 x 0.22
+// (corner 0.05) in accent darkened 30 %.
 static float4 drawDomeBase(float4 acc, float2 p, float aa, constant CharacterUniforms& u) {
     float dBase = sdRoundBox(p, float2(0.0, -1.55), float2(1.70, 0.25), 0.12);
-    float3 col = u.colAccent.rgb;
     float t = clamp((p.y + 1.80) / 0.50, 0.0, 1.0);
-    col = mix(col * 0.65, col * 1.1, t);
-    float grain = sin(p.x * 18.0 + sin(p.y * 30.0) * 1.5) * 0.5 + 0.5;
-    col *= (0.94 + 0.06 * grain);
-    float dPlate = sdRoundBox(p, float2(0.0, -1.55), float2(0.55, 0.11), 0.04);
-    col = mix(col, u.colAccent.rgb * 0.55, fillAA(dPlate, aa));
-    col = mix(col, u.colAccent2.rgb, 0.25 * strokeAA(dPlate, 0.008, aa));
-    float rim = clamp((dBase + 0.04) / 0.04, 0.0, 1.0);
-    col = mix(col, u.colAccent.rgb * 0.5, 0.5 * rim * rim);
-    acc = blendOver(acc, float3(0.0), 0.25 * exp(-max(dBase, 0.0) / 0.15) * step(0.0, dBase) * step(p.y, -1.6));
+    float3 col = mix(u.colAccent.rgb * 0.65, u.colAccent.rgb, t);
+    float dPlate = sdRoundBox(p, float2(0.0, -1.55), float2(0.55, 0.11), 0.05);
+    col = mix(col, u.colAccent.rgb * 0.70, fillAA(dPlate, aa));
     return blendOver(acc, col, fillAA(dBase, aa));
 }
 
@@ -783,18 +809,22 @@ static inline float sdDomeGlass(float2 p) {
 
 // Glass layer composited over `acc`. With acc = 0 it returns the glass alone (premultiplied), which the sparkle pass
 // uses to put the fireflies under the glass.
+// The highlights are the Canvas drawDomeGlass shapes: one specular streak on the upper left (white alpha 0.35), the bottom
+// reflection ellipse (white alpha 0.15) and the shimmer streak on the right (white alpha 0.35 x 0.5 accessory).
 static float4 drawDomeGlass(float4 acc, float2 p, float aa, constant CharacterUniforms& u) {
     float dG = sdDomeGlass(p);
-    float inside = fillAA(dG, aa);
     float3 glass = u.colAccent2.rgb;
-    acc = blendOver(acc, glass, 0.10 * inside);
+    acc = blendOver(acc, glass, 0.10 * fillAA(dG, aa));
     acc = blendOver(acc, glass, 0.35 * strokeAA(dG, 0.015, aa));
-    float dS = sdCapsule(p, float2(-1.05, 0.45), float2(-0.55, 1.30), 0.05);
-    acc = blendOver(acc, float3(1.0), 0.35 * fillAA(dS, aa + 0.02));
-    float dS2 = sdCapsule(p, float2(-1.22, 0.05), float2(-1.15, 0.30), 0.03);
-    acc = blendOver(acc, float3(1.0), 0.25 * fillAA(dS2, aa + 0.02));
-    float refl = strokeAA(dG + 0.10, 0.03, aa) * (1.0 - smoothstep(-1.30, -0.80, p.y)) * 0.15;
-    acc = blendOver(acc, float3(1.0), refl);
+    float dS = sdCapsule(p, float2(-1.12, 0.50), float2(-0.70, 1.20), 0.045);
+    acc = blendOver(acc, float3(1.0), 0.35 * fillAA(dS, aa));
+    float dR = sdEllipseGrad(p, float2(0.0, -1.20), float2(1.15, 0.06));
+    acc = blendOver(acc, float3(1.0), 0.15 * fillAA(dR, aa));
+    float shimmer = clamp(u.armsAccessory.z, 0.0, 1.0);
+    if (shimmer > 0.002) {
+        float dSh = sdCapsule(p, float2(1.05, 0.20), float2(0.85, 0.95), 0.03);
+        acc = blendOver(acc, float3(1.0), 0.175 * shimmer * fillAA(dSh, aa));
+    }
     return acc;
 }
 
@@ -1037,7 +1067,7 @@ fragment float4 characterFragment(CharacterVaryings in [[stage_in]],
 
     // 6. Accessories on the body.
     if (hasFeature(features, kFeatBrain)) {
-        acc = drawBrain(acc, q, aaB, u);
+        acc = drawBrain(acc, q, (shape == 2) ? (0.18 * sin(wig)) : 0.0, aaB, u);
     }
     if (hasFeature(features, kFeatMoonMark)) {
         acc = drawMoonMark(acc, q, aaB, u);
@@ -1111,8 +1141,8 @@ vertex SparkleVaryings sparkleVertex(uint vid [[vertex_id]],
         // sparkleFragment clips the others per pixel at the glass wall, like the Canvas clip.
         alpha = 0.0;
     }
-    if (alpha <= 0.004) {
-        // Invisible particle: collapse the quad so it produces no fragments.
+    if (alpha <= 0.04 || size <= 0.002) {
+        // Invisible particle (the Canvas renderer skips the same ones): collapse the quad so it produces no fragments.
         size = 0.0;
     }
     float cx = (vid == 1u || vid == 4u || vid == 5u) ? 1.0 : -1.0;
@@ -1132,11 +1162,12 @@ vertex SparkleVaryings sparkleVertex(uint vid [[vertex_id]],
 
 fragment float4 sparkleFragment(SparkleVaryings in [[stage_in]],
                                 constant CharacterUniforms& u [[buffer(0)]]) {
-    float2 a = abs(in.uv) * 1.6;
-    float s = sqrt(a.x) + sqrt(a.y);
-    float star = 1.0 - smoothstep(0.55, 1.0, s);
-    float core = exp(-dot(in.uv, in.uv) * 5.0) * 0.6;
-    float m = clamp(star + core, 0.0, 1.0) * in.alpha;
+    // `uv` spans the quad (half-size 1.6 size), so 1.6 uv is the offset in units of the sparkle size: the star's tips
+    // reach half coverage exactly at `size`, like the hard-edged Canvas star.
+    float2 sp = in.uv * 1.6;
+    float2 fs = fwidth(sp);
+    float aaS = max(max(fs.x, fs.y), 1e-4);
+    float m = fillAA(sdSparkleStar(sp), aaS) * in.alpha;
     float2 fw = fwidth(in.world);
     float aa = max(max(fw.x, fw.y), 1e-4);
     uint features = uint(max(u.style.y, 0.0) + 0.5);
@@ -1150,5 +1181,6 @@ fragment float4 sparkleFragment(SparkleVaryings in [[stage_in]],
     float3 col = mix(u.colGlow.rgb, float3(1.0), 0.5);
     return float4(col * m, m);
 }
+
 """#
 }

@@ -8,7 +8,8 @@ extension CharacterCatalog {
     ///
     /// Layout notes: eyes at y 0, wide mouth (half width 0.24, tall when open) at −0.38 for big laughs,
     /// cheeks beside the mouth. Shares the Elementals frame (`radiusScale 0.56`, body raised 0.08 R so the legs
-    /// and the flame tip balance). Idle: flicker 1.6 Hz, lively bob.
+    /// and the flame tip balance). Idle: flicker 1.6 Hz, lively bob. Glow 1.1 (not higher): the glow colour is close
+    /// to `bodyBottom`, so an opaque halo at the silhouette would dissolve the lower edge.
     public static let ember: CharacterDesign = CharacterDesign(
         kind: .ember,
         bodyShape: .flame,
@@ -28,7 +29,7 @@ extension CharacterCatalog {
                         flickerRate: 1.6, breathDepth: 1.1),
         personality: Personality(energy: 0.9, shyness: 0.05, curiosity: 0.6, playfulness: 0.8),
         voice: VoiceStyle(pitch: 1.2, rate: 1.1),
-        glowStrength: 1.5,
+        glowStrength: 1.1,
         sparkleRate: 0.45,
         tagline: [
             "ru": "Неугомонный огонёк — прыгает, хохочет и греет друзей своим теплом.",

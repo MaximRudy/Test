@@ -43,13 +43,16 @@ final class CharacterCatalogTests: XCTestCase {
 
     /// The §5 palette table, one row per kind, columns in table order (bodyTop, bodyBottom, highlight, shadow,
     /// accent, accent2, iris, pupil, sclera, cheek, glow, mouthInner, tongue, teeth, outline).
+    /// Documented deviation (see `Nox.swift`, pending a §5 contract change request): Nox's mouthInner is 0x9E2F78
+    /// instead of 0x0E0620 and its outline 0xE6B3FF instead of 0x2A1550, so mouth, brows and closed eyes read on
+    /// the dark face.
     private static let paletteTable: [CharacterKind: [UInt32]] = [
         .lumi: [0xFFE066, 0xFFB224, 0xFFF6C2, 0xE08A12, 0x1E1748, 0x7B5CFF, 0x2B1B12, 0x120A06,
                 0xFFFFFF, 0xFFB088, 0xFFD36A, 0x5A2415, 0xFF7E8A, 0xFFFFFF, 0x4A2A10],
         .spark: [0xFFE873, 0xFFC531, 0xFFF8D0, 0xE79A1A, 0xB9A0EC, 0x8E6FD6, 0x4A2A6E, 0x1D0F33,
                  0xFFFFFF, 0xFF9FB0, 0xFFD866, 0x6B2E4A, 0xFF8DA1, 0xFFFFFF, 0x6A3E12],
         .nox: [0xFF6AD5, 0x4C5BFF, 0xFFD0F5, 0x2B1E78, 0x150B33, 0xFFF1B5, 0xB86BFF, 0x1A0A33,
-               0x2A1550, 0xFF7FD8, 0xB06CFF, 0x0E0620, 0xFF6FAE, 0xFFFFFF, 0x2A1550],
+               0x2A1550, 0xFF7FD8, 0xB06CFF, 0x9E2F78, 0xFF6FAE, 0xFFFFFF, 0xE6B3FF],
         .lumie: [0xFFE07A, 0xFFB13D, 0xFFF9DC, 0xE68A1E, 0x7A4E2A, 0xDFF5FF, 0x3B2412, 0x140B05,
                  0xFFFFFF, 0xFFA573, 0xFFC95A, 0x6A2E1A, 0xFF8E8E, 0xFFFFFF, 0x5C3A14],
         .ember: [0xFFD93D, 0xFF7A1A, 0xFFF3B0, 0xD8450C, 0xFFF0A0, 0xFF4D1C, 0x5A2E0F, 0x1A0A02,
@@ -164,6 +167,13 @@ final class CharacterCatalogTests: XCTestCase {
             // The glowing irises sit directly on the dark face (accent); tongue and teeth sit on the mouth fill.
             XCTAssertGreaterThanOrEqual(contrastRatio(palette.iris, palette.accent), 3,
                                         "\(design.kind) irises vanish on the dark face")
+            // Brows, closed-eye lash lines and the lip line are drawn in `outline` on the dark face.
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.outline, palette.accent), 4.5,
+                                        "\(design.kind) brows and closed eyes vanish on the dark face")
+            // At rest the mouth is only a thin `mouthInner` curve (the lip line fades in with the jaw), so the fill
+            // itself must read on the dark face.
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.mouthInner, palette.accent), 2.5,
+                                        "\(design.kind) mouth vanishes on the dark face")
             XCTAssertGreaterThanOrEqual(contrastRatio(palette.tongue, palette.mouthInner), 2.5,
                                         "\(design.kind) tongue vanishes inside the mouth")
             XCTAssertGreaterThanOrEqual(contrastRatio(palette.teeth, palette.mouthInner), 2.5,
@@ -393,8 +403,8 @@ final class CharacterCatalogTests: XCTestCase {
     }
 
     /// Lumi's brows are centred right under the star's upper notches (inner vertices at radius 0.52, 54°:
-    /// (±0.306, 0.4207)). Even the surprised raise (§6: 0.9 → +0.108, §3.2) must keep them inside the silhouette,
-    /// and at rest they must clear the eyes.
+    /// (±0.306, 0.4207)). Even at the surprised raise (§6: 0.9 → +0.108, §3.2) the brow's straight capsule (the 0.03
+    /// upward bend aside) must stay below the notch vertex, and at rest the brows must clear the eyes.
     func testLumiBrowsStayInsideTheStar() {
         let face = CharacterCatalog.lumi.face
         let notchY: Float = 0.4207
@@ -403,6 +413,18 @@ final class CharacterCatalogTests: XCTestCase {
         XCTAssertLessThanOrEqual(raisedBrowTop, notchY, "Lumi's raised brows poke out through the star's upper notches")
         XCTAssertGreaterThan(face.browY - face.browThickness / 2, face.eyeY + face.eyeRadiusY,
                              "Lumi's brows touch the eyes at rest")
+    }
+
+    /// Sprout's cap covers the body above y 0.35 (§3.6). At rest the brows, including their 0.03 upward bend (§3.2),
+    /// must stay under that line and clear of the eye tops.
+    func testSproutBrowsStayUnderTheCap() {
+        let face = CharacterCatalog.sprout.face
+        let capLine: Float = 0.35
+        let browSagitta: Float = 0.03
+        let restingBrowTop = face.browY + browSagitta + face.browThickness / 2
+        XCTAssertLessThan(restingBrowTop, capLine, "Sprout's resting brows run onto the cap")
+        XCTAssertGreaterThan(face.browY - face.browThickness / 2, face.eyeY + face.eyeRadiusY,
+                             "Sprout's brows touch the eyes at rest")
     }
 
     // MARK: - Idle, personality, voice, text

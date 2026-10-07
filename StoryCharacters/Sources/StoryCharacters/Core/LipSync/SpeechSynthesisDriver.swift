@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import QuartzCore
+import os
 
 /// On-device TTS with word-aligned lip-sync.
 ///
@@ -8,6 +9,9 @@ import QuartzCore
 /// the main actor. On `willSpeakRangeOfSpeechString` the word's visemes are estimated and scheduled from the
 /// callback time by `SpeechWordTimer` (adaptive seconds-per-character, EMA of the measured inter-word intervals
 /// excluding punctuation pauses); the mixer clips the previous word to the measured gap when the next word arrives.
+/// The `AVAudioSession` is shared by all drivers through `SpeechAudioSession`: each driver holds it from `speak`
+/// until its utterance ends (or the driver is deallocated), and the session is deactivated shortly after the last
+/// holder lets go.
 @MainActor
 public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
 
@@ -39,13 +43,11 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
     private var resumeAfterPause = false
     /// The pending pause was undone internally; swallow the matching `didContinue`.
     private var suppressResumeEvent = false
-    private var sessionActive = false
-    private var deactivationTask: Task<Void, Never>?
+    /// Whether this driver holds one reference on the shared `SpeechAudioSession`. A Sendable `let`, so `deinit`
+    /// can return the hold of a driver that is deallocated mid-utterance.
+    private let audioSessionHold = OSAllocatedUnfairLock(initialState: false)
     private var voiceCache: [String: AVSpeechSynthesisVoice] = [:]
 
-    /// Delay before the audio session is released after speech ends (story playback speaks one sentence per
-    /// utterance; releasing between sentences would un-duck and re-duck other audio every time).
-    private static let deactivationDelayNanoseconds: UInt64 = 1_500_000_000
     /// Bound on `retiredUtterances` in case the synthesizer never reports the end of a stopped utterance.
     private static let maxRetiredUtterances = 8
 
@@ -56,16 +58,32 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
         synthesizer.delegate = proxy
     }
 
+    deinit {
+        // The synthesizer goes away with the driver, so its speech ends here. Return the session hold so the shared
+        // coordinator can schedule the deactivation this driver can no longer perform.
+        let heldSession = audioSessionHold.withLock { (flag: inout Bool) -> Bool in
+            let previous = flag
+            flag = false
+            return previous
+        }
+        if heldSession {
+            Task { @MainActor in
+                SpeechAudioSession.release()
+            }
+        }
+    }
+
     // MARK: Control
 
     /// Speaks `text`; an utterance already in progress is cancelled first.
     public func speak(_ text: String, languageCode: String, voice: VoiceStyle, prosody: Prosody) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        stop()
+        // Keep the session hold across the hand-over from the cancelled utterance to the new one, so it is not
+        // released and re-acquired for every sentence.
+        cancelCurrentUtterance(releasingAudioSession: trimmed.isEmpty)
         guard !trimmed.isEmpty else { return }
 
-        cancelPendingDeactivation()
-        activateSessionIfNeeded()
+        acquireAudioSession()
 
         // Speak the caller's string unchanged so `.word` ranges index it directly.
         let utterance = AVSpeechUtterance(string: text)
@@ -98,6 +116,12 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
 
     /// Stops immediately; emits `.cancelled` if an utterance was in progress.
     public func stop() {
+        cancelCurrentUtterance(releasingAudioSession: true)
+    }
+
+    /// Stops the current utterance (emitting `.cancelled` if there was one). `speak` passes
+    /// `releasingAudioSession: false` because it takes over the hold for the next utterance.
+    private func cancelCurrentUtterance(releasingAudioSession: Bool) {
         let wasSpeaking = currentUtteranceID != nil
         // Unconditional: the synthesizer queues work asynchronously and may not report `isSpeaking` yet.
         _ = synthesizer.stopSpeaking(at: .immediate)
@@ -105,7 +129,7 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
             retire(utterance)
         }
         if wasSpeaking {
-            finish(with: .cancelled)
+            finish(with: .cancelled, releasingAudioSession: releasingAudioSession)
         } else {
             mixer.clear()
             isSpeaking = false
@@ -113,6 +137,9 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
             pauseRequested = false
             resumeAfterPause = false
             suppressResumeEvent = false
+            if releasingAudioSession {
+                releaseAudioSession()
+            }
         }
     }
 
@@ -205,7 +232,7 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
         finish(with: .cancelled)
     }
 
-    private func finish(with event: SpeechEvent) {
+    private func finish(with event: SpeechEvent, releasingAudioSession: Bool = true) {
         currentUtteranceID = nil
         currentUtterance = nil
         timer.resetAnchor()
@@ -215,7 +242,9 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
         pauseRequested = false
         resumeAfterPause = false
         suppressResumeEvent = false
-        scheduleDeactivation()
+        if releasingAudioSession {
+            releaseAudioSession()
+        }
         onEvent?(event)
     }
 
@@ -312,52 +341,28 @@ public final class SpeechSynthesisDriver: NSObject, LipSyncSource {
 
     // MARK: Audio session
 
-    private func activateSessionIfNeeded() {
-        #if os(iOS) || os(tvOS) || os(visionOS)
-        guard !sessionActive else { return }
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-            try session.setActive(true)
-            sessionActive = true
-        } catch {
-            sessionActive = false
+    /// Takes this driver's hold on the shared session (at most one per driver).
+    private func acquireAudioSession() {
+        let alreadyHeld = audioSessionHold.withLock { (flag: inout Bool) -> Bool in
+            let previous = flag
+            flag = true
+            return previous
         }
-        #endif
-    }
-
-    /// Releases the session a little after speech ends unless `speak` is called again in the meantime.
-    private func scheduleDeactivation() {
-        deactivationTask?.cancel()
-        guard sessionActive else {
-            deactivationTask = nil
-            return
-        }
-        deactivationTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: SpeechSynthesisDriver.deactivationDelayNanoseconds)
-            guard !Task.isCancelled, let self = self else { return }
-            self.deactivationTask = nil
-            if self.currentUtteranceID == nil {
-                self.deactivateSession()
-            }
+        if !alreadyHeld {
+            SpeechAudioSession.acquire()
         }
     }
 
-    private func cancelPendingDeactivation() {
-        deactivationTask?.cancel()
-        deactivationTask = nil
-    }
-
-    private func deactivateSession() {
-        #if os(iOS) || os(tvOS) || os(visionOS)
-        guard sessionActive else { return }
-        sessionActive = false
-        do {
-            try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-        } catch {
-            // Another player may own the session; nothing to do.
+    /// Returns this driver's hold; the coordinator deactivates the session a little later once nobody holds it.
+    private func releaseAudioSession() {
+        let wasHeld = audioSessionHold.withLock { (flag: inout Bool) -> Bool in
+            let previous = flag
+            flag = false
+            return previous
         }
-        #endif
+        if wasHeld {
+            SpeechAudioSession.release()
+        }
     }
 }
 

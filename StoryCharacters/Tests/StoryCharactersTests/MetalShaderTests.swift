@@ -72,10 +72,11 @@ final class MetalShaderTests: XCTestCase {
         try XCTSkipUnless(FileManager.default.fileExists(atPath: url.path),
                           "CharacterShaders.metal not found next to the test sources at \(url.path)")
         let fileText = try String(contentsOf: url, encoding: .utf8)
-        let trimmedFile = fileText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedEmbedded = CharacterShaderSource.msl.trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(trimmedEmbedded.count, trimmedFile.count, "embedded MSL length differs from the .metal file")
-        XCTAssertTrue(trimmedEmbedded == trimmedFile, "embedded MSL differs from CharacterShaders.metal")
+        let embedded = CharacterShaderSource.msl
+        // CONTRACT §4.4: byte-identical, including the final newline.
+        XCTAssertEqual(embedded.utf8.count, fileText.utf8.count, "embedded MSL length differs from the .metal file")
+        XCTAssertTrue(embedded.utf8.elementsEqual(fileText.utf8), "embedded MSL differs from CharacterShaders.metal")
+        XCTAssertTrue(embedded.hasSuffix("}\n"), "embedded MSL lost the file's final newline")
     }
 
     func testEmbeddedSourceHasNoSwiftInterpolationSequence() {
@@ -135,6 +136,36 @@ final class MetalShaderTests: XCTestCase {
         XCTAssertTrue(msl.contains("float raise = clamp((side < 0.0) ? u.brows.x : u.brows.y, -1.0, 1.0);"))
         // Dome fireflies are composited under the glass (Canvas order: sparkles, then glass).
         XCTAssertTrue(msl.contains("m *= fillAA(sdDomeGlass(in.world), aa) * (1.0 - glass.a);"))
+    }
+
+    func testAccessoryShadingFollowsTheCanvasRenderer() {
+        let msl = CharacterShaderSource.msl
+        // Lumi's dark robe is back-lit by an accent2 rim so the hood silhouette stays visible on the night sky.
+        XCTAssertTrue(msl.contains("col = mix(col, u.colAccent2.rgb, 0.60 * rim * rim * rim);"))
+        // Puff's cloud is an exact union of circles like `CharacterPaths.cloudBody` (no smooth-min filling the creases).
+        XCTAssertTrue(msl.contains("d = min(d, sdCircle(q, float2(-0.55, -0.10), 0.55));"))
+        // Dome highlights: the Canvas streak, reflection ellipse and accessory shimmer.
+        XCTAssertTrue(msl.contains("float dS = sdCapsule(p, float2(-1.12, 0.50), float2(-0.70, 1.20), 0.045);"))
+        XCTAssertTrue(msl.contains("float dR = sdEllipseGrad(p, float2(0.0, -1.20), float2(1.15, 0.06));"))
+        XCTAssertTrue(msl.contains("float dSh = sdCapsule(p, float2(1.05, 0.20), float2(0.85, 0.95), 0.03);"))
+        // Sparkle sprite = the Canvas 4-point star (tips at `size`, inner vertices at 0.36 size); same visibility cut-off.
+        XCTAssertTrue(msl.contains("float2(0.254558441, 0.254558441)"))
+        XCTAssertTrue(msl.contains("float m = fillAA(sdSparkleStar(sp), aaS) * in.alpha;"))
+        XCTAssertTrue(msl.contains("if (alpha <= 0.04 || size <= 0.002) {"))
+    }
+
+    func testClosedEyesAndBrainFollowTheCanvasRenderer() {
+        let msl = CharacterShaderSource.msl
+        // Closed eyes: a relaxed closure sags, a cheek-squeezed one (laughing, giggle) arches into the happy ^ ^ like
+        // the Canvas lash line y = y0 + amp·(1 − xn²).
+        XCTAssertTrue(msl.contains("float happy = smoothstep(0.45, 0.85, clamp(lowerLid, 0.0, 1.0));"))
+        XCTAssertTrue(msl.contains("float amp = -0.04 + 0.09 * happy;"))
+        XCTAssertTrue(msl.contains("float curveY = y0 + amp * (1.0 - xn * xn);"))
+        // Spark's brain: the Canvas centre (0, 0.58) and radius 0.27 (= 0.9 × 0.30), sheared with the swaying drop tip.
+        XCTAssertTrue(msl.contains("float k = (1.0 + 0.08 * a) * 0.9;"))
+        XCTAssertTrue(msl.contains("float2 c = float2(0.0, 0.58);"))
+        XCTAssertTrue(msl.contains("float2 qs = float2(q.x - tipX * smoothstep(0.05, 1.15, q.y), q.y);"))
+        XCTAssertTrue(msl.contains("acc = drawBrain(acc, q, (shape == 2) ? (0.18 * sin(wig)) : 0.0, aaB, u);"))
     }
 
     func testBreathingUsesTheDesignBreathDepth() {

@@ -14,6 +14,7 @@ extension CanvasScene {
     /// opening (ellipse (0, 0.05), radii (0.80, 0.84)) shows the hood interior — the robe colour at 45 %, as the MSL
     /// `robeColor(…, interior)` — and the body is drawn on top of it through a clip to the opening (see `draw(in:)`).
     /// `.starPattern` sprinkles the static grid star field on the robe outside the opening (MSL: `robeCov·(1 − opening)`).
+    /// An accent2 rim light inside the robe outline keeps the dark robe readable on the night sky (MSL `robeColor`).
     func drawRobeBack(in ctx: inout GraphicsContext) {
         let robePath = body.path(CharacterPaths.robe(peakX: 0.08 * sin(wiggle)))
         let openingPath = body.path(res.robeOpening)
@@ -25,10 +26,11 @@ extension CanvasScene {
             stars.clip(to: openingPath, options: .inverse)
             stars.fill(body.path(res.robeStarField), with: .color(res.robeStar))
         }
+        drawRobeRim(robePath, in: ctx)
     }
 
     /// Robe front (collar below y = −0.55 + 0.05·x²) drawn over the body so the star peeks out of the opening; the
-    /// star field continues on it (MSL: `robeStars·front`).
+    /// star field and the rim light continue on it (MSL: `robeStars·front`, `robeBase·front`).
     func drawRobeFront(in ctx: inout GraphicsContext) {
         let robePath = body.path(CharacterPaths.robe(peakX: 0.08 * sin(wiggle)))
         var c = ctx
@@ -39,8 +41,17 @@ extension CanvasScene {
             stars.clip(to: robePath)
             stars.fill(body.path(res.robeStarField), with: .color(res.robeStar))
         }
-        // Thin trim along the robe edge for definition.
-        c.stroke(robePath, with: .color(res.accent2Dark), lineWidth: body.length(0.03))
+        drawRobeRim(robePath, in: c)
+    }
+
+    /// Rim light of the MSL `robeColor` (`mix(col, accent2, 0.60·rim³)` within 0.10 of the edge): two accent2 strokes
+    /// centred on the outline and clipped to the robe, so each covers half its width inside — α 0.22 over 0.10 and
+    /// α 0.45 over the outermost 0.035.
+    private func drawRobeRim(_ robePath: Path, in ctx: GraphicsContext) {
+        var rim = ctx
+        rim.clip(to: robePath)
+        rim.stroke(robePath, with: .color(res.robeRimSoft), lineWidth: body.length(0.20))
+        rim.stroke(robePath, with: .color(res.robeRimHard), lineWidth: body.length(0.07))
     }
 
     private var robeShading: GraphicsContext.Shading {
@@ -64,7 +75,16 @@ extension CanvasScene {
         let starCenterUnit = CGPoint(x: -0.04, y: 0.02).applying(bookT)
         let coverStar = CharacterPaths.star4(center: starCenterUnit, radius: 0.09, inner: 0.4)
         let coverGlow = CharacterPaths.circle(center: starCenterUnit, radius: 0.24)
-        ctx.fill(body.path(cover), with: .color(res.accent2))
+        // Cover shading as the MSL: accent2·0.7 → accent2 along the book's own y (book-local −0.3 → +0.2), then rim
+        // darkening towards the outline (0.4·rim² within 0.04 of the edge) as two nested strokes clipped to the cover.
+        let coverPath = body.path(cover)
+        ctx.fill(coverPath, with: .linearGradient(res.bookGradient,
+                                                  startPoint: body.point(CGPoint(x: 0, y: -0.30).applying(bookT)),
+                                                  endPoint: body.point(CGPoint(x: 0, y: 0.20).applying(bookT))))
+        var coverRim = ctx
+        coverRim.clip(to: coverPath)
+        coverRim.stroke(coverPath, with: .color(res.bookRimOuter), lineWidth: body.length(0.08))
+        coverRim.stroke(coverPath, with: .color(res.bookRimInner), lineWidth: body.length(0.03))
         ctx.fill(body.path(pageEdge), with: .color(res.teeth))
         let saved = ctx.opacity
         ctx.opacity = Double(0.5 + 0.5 * accessory)
@@ -74,8 +94,24 @@ extension CanvasScene {
         ctx.opacity = saved
 
         // Wand: capsule (0.85, −0.30) → (1.25, 0.35), r 0.05, with a 4-point star at the tip; glow α = accessory2.
-        let wand = CharacterPaths.capsule(from: CGPoint(x: 0.85, y: -0.30), to: CGPoint(x: 1.25, y: 0.35), radius: 0.05)
-        ctx.fill(body.path(wand), with: .color(res.wandColor))
+        let wandStart = CGPoint(x: 0.85, y: -0.30)
+        let wandEnd = CGPoint(x: 1.25, y: 0.35)
+        let wandPath = body.path(CharacterPaths.capsule(from: wandStart, to: wandEnd, radius: 0.05))
+        ctx.fill(wandPath, with: .color(res.wandColor))
+        // Highlight stripe 0.02 to the left of the wand axis, width 0.024, highlight α 0.35 (MSL), clipped to the wand.
+        let wdx = wandEnd.x - wandStart.x
+        let wdy = wandEnd.y - wandStart.y
+        let wlen = sqrt(wdx * wdx + wdy * wdy)
+        let ux = wdx / wlen
+        let uy = wdy / wlen
+        let nx = -uy * 0.02
+        let ny = ux * 0.02
+        var stripe = Path()
+        stripe.move(to: CGPoint(x: wandStart.x - 0.1 * ux + nx, y: wandStart.y - 0.1 * uy + ny))
+        stripe.addLine(to: CGPoint(x: wandEnd.x + 0.1 * ux + nx, y: wandEnd.y + 0.1 * uy + ny))
+        var wandCtx = ctx
+        wandCtx.clip(to: wandPath)
+        wandCtx.stroke(body.path(stripe), with: .color(res.wandStripe), lineWidth: body.length(0.024))
         let tip = CGPoint(x: 1.28, y: 0.40)
         if accessory2 > 0.02 {
             ctx.opacity = Double(accessory2)
@@ -88,35 +124,46 @@ extension CanvasScene {
 
     // MARK: - Brain (Spark)
 
-    /// Six-circle brain around (0, 0.62), radius 0.30·k with k = 1 + 0.08·accessory, pulsing accent2 halo — shaded like
-    /// the MSL `drawBrain`: a vertical shade towards accent2 (brain-frame y: accent at +0.18·k → 40 % accent2 at
-    /// −0.42·k), the accent2 grooves clipped to the brain, then rim darkening towards accent2·0.8 within 0.04 of the
-    /// edge (two bands bounded by the inset brain paths).
+    /// Six-circle brain around (0, 0.58), radius 0.27·k with k = 1 + 0.08·accessory, pulsing accent2 halo — shaded like
+    /// the MSL `drawBrain`: a vertical shade towards accent2 (brain-frame y with kb = radius / 0.30: accent at +0.18·kb →
+    /// 40 % accent2 at −0.42·kb), the accent2 grooves clipped to the brain, then rim darkening towards accent2·0.8 within
+    /// 0.04 of the edge (two bands bounded by the inset brain paths).
+    /// For `drop` bodies everything is sheared with the swaying tip (`CharacterPaths.brainShear`), so the brain rides on
+    /// the head instead of poking out of the silhouette.
     func drawBrain(in ctx: inout GraphicsContext) {
         let accessory = clamp01(pose.body.accessory)
         let k: CGFloat = 1 + 0.08 * accessory
-        let r: CGFloat = 0.30 * k
-        let c = CGPoint(x: 0, y: 0.62)
+        let r: CGFloat = CharacterPaths.brainRadius * k
+        let kb: CGFloat = r / 0.30
+        let c = CharacterPaths.brainCenter
+        let tipX: CGFloat = design.bodyShape == .drop ? 0.18 * sin(wiggle) : 0
+        let shear = CharacterPaths.brainShear(tipX: tipX)
+        let frame = body.prepending(shear)
         if accessory > 0.02 {
-            let saved = ctx.opacity
-            ctx.opacity = Double(accessory * 0.6)
-            ctx.fill(body.path(CharacterPaths.circle(center: c, radius: r * 1.7)),
-                     with: .radialGradient(res.accent2GlowGradient, center: body.point(c), startRadius: 0, endRadius: body.length(r * 1.7)))
-            ctx.opacity = saved
+            // Halo drawn through the sheared frame so the gradient shears with its circle.
+            let haloR = r * 1.7
+            var halo = ctx
+            halo.opacity = Double(accessory * 0.6)
+            halo.concatenate(frame.matrix)
+            halo.fill(CharacterPaths.circle(center: c, radius: haloR),
+                      with: .radialGradient(res.accent2GlowGradient, center: c, startRadius: 0, endRadius: haloR))
         }
-        let brainPath = body.path(CharacterPaths.brain(center: c, radius: r))
+        let brainPath = frame.path(CharacterPaths.brain(center: c, radius: r))
+        // The shear keeps horizontal lines horizontal, so the shade runs vertically in the body frame through the
+        // sheared centre (iso-lines depend on y only, as in the MSL).
+        let shadeX = c.applying(shear).x
         ctx.fill(brainPath, with: .linearGradient(res.brainGradient,
-                                                  startPoint: body.point(c.x, c.y + 0.18 * k),
-                                                  endPoint: body.point(c.x, c.y - 0.42 * k)))
+                                                  startPoint: body.point(shadeX, c.y + 0.18 * kb),
+                                                  endPoint: body.point(shadeX, c.y - 0.42 * kb)))
         var inside = ctx
         inside.clip(to: brainPath)
-        inside.stroke(body.path(CharacterPaths.brainGrooves(center: c, radius: r)), with: .color(res.accent2),
-                      style: StrokeStyle(lineWidth: body.length(0.025), lineCap: .round, lineJoin: .round))
+        inside.stroke(frame.path(CharacterPaths.brainGrooves(center: c, radius: r)), with: .color(res.accent2),
+                      style: StrokeStyle(lineWidth: frame.length(0.025), lineCap: .round, lineJoin: .round))
         var rimOuter = inside
-        rimOuter.clip(to: body.path(CharacterPaths.brain(center: c, radius: r, inset: 0.04)), options: .inverse)
+        rimOuter.clip(to: frame.path(CharacterPaths.brain(center: c, radius: r, inset: 0.04)), options: .inverse)
         rimOuter.fill(brainPath, with: .color(res.brainRimOuter))
         var rimInner = inside
-        rimInner.clip(to: body.path(CharacterPaths.brain(center: c, radius: r, inset: 0.015)), options: .inverse)
+        rimInner.clip(to: frame.path(CharacterPaths.brain(center: c, radius: r, inset: 0.015)), options: .inverse)
         rimInner.fill(brainPath, with: .color(res.brainRimInner))
     }
 
@@ -143,13 +190,17 @@ extension CanvasScene {
         ctx.fill(plate, with: .color(res.accentDark))
     }
 
-    /// Glass bell: fill accent2 α 0.10, rim α 0.35 width 0.03, specular streak, bottom reflection; `accessory` shimmers.
+    /// Glass bell: fill accent2 α 0.10, rim α 0.35 width 0.03, two specular streaks (the MSL's: (−1.05, 0.45) →
+    /// (−0.55, 1.30) r 0.05 α 0.35 and (−1.22, 0.05) → (−1.15, 0.30) r 0.03 α 0.25), bottom reflection;
+    /// `accessory` shimmers.
     func drawDomeGlass(in ctx: inout GraphicsContext) {
         let glass = base.path(res.domeGlass)
         ctx.fill(glass, with: .color(res.glassFill))
         ctx.stroke(glass, with: .color(res.glassRim), lineWidth: base.length(0.03))
-        let streak = CharacterPaths.capsule(from: CGPoint(x: -1.12, y: 0.50), to: CGPoint(x: -0.70, y: 1.20), radius: 0.045)
+        let streak = CharacterPaths.capsule(from: CGPoint(x: -1.05, y: 0.45), to: CGPoint(x: -0.55, y: 1.30), radius: 0.05)
         ctx.fill(base.path(streak), with: .color(res.specular))
+        let streak2 = CharacterPaths.capsule(from: CGPoint(x: -1.22, y: 0.05), to: CGPoint(x: -1.15, y: 0.30), radius: 0.03)
+        ctx.fill(base.path(streak2), with: .color(res.specularDim))
         let reflection = CharacterPaths.ellipse(center: CGPoint(x: 0, y: -1.20), rx: 1.15, ry: 0.06)
         ctx.fill(base.path(reflection), with: .color(res.reflection))
         let accessory = clamp01(pose.body.accessory)

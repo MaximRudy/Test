@@ -36,10 +36,10 @@ struct SpeechPanel: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(
+                .background {
                     RoundedRectangle(cornerRadius: AppTheme.controlRadius, style: .continuous)
                         .fill(Color.white.opacity(0.08))
-                )
+                }
                 .accessibilityLabel(L10n.speechPlaceholder)
 
             GlassEffectContainer(spacing: 10) {
@@ -83,7 +83,9 @@ struct SpeechPanel: View {
                                 .lineLimit(1)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 8)
-                                .background(Capsule().fill(Color.white.opacity(0.08)))
+                                .background {
+                                    Capsule().fill(Color.white.opacity(0.08))
+                                }
                         }
                         .buttonStyle(.plain)
                     }

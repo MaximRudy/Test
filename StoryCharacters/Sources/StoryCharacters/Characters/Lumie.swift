@@ -8,7 +8,8 @@ extension CharacterCatalog {
     ///
     /// Layout notes: the flame is small so the dome (r 1.55) and base fit the view — `radiusScale 0.40`, body
     /// raised by 0.25 R. A lighter inner flame sits behind the face. Eyes centred at y 0, mouth at −0.38.
-    /// Idle: flicker 1.2 Hz, fireflies (sparkle field confined to the dome), float 0.04.
+    /// Idle: flicker 1.2 Hz, fireflies (sparkle field confined to the dome), float 0.04. Glow 1.15 keeps a soft bloom
+    /// without an opaque halo at the silhouette.
     /// Signature (Core): `.happy`/`.love` → dome fills with fireflies (accessory 1); `.scared` → flame shrinks (scale 0.85).
     public static let lumie: CharacterDesign = CharacterDesign(
         kind: .lumie,
@@ -29,7 +30,7 @@ extension CharacterCatalog {
                         flickerRate: 1.2, breathDepth: 1),
         personality: Personality(energy: 0.4, shyness: 0.3, curiosity: 0.45, playfulness: 0.4),
         voice: VoiceStyle(pitch: 1.25, rate: 0.9),
-        glowStrength: 1.4,
+        glowStrength: 1.15,
         sparkleRate: 0.7,
         tagline: [
             "ru": "Уютный огонёк под стеклянным куполом — мягко светит и собирает вокруг себя светлячков.",

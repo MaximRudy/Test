@@ -102,12 +102,14 @@ extension CanvasScene {
     /// 40 ambient sparkles (+20 burst slots), 4-point stars. For `.dome` designs the first `round(20·accessory)`
     /// burst slots become extra ambient fireflies (seeds 40…), exactly like the Metal `sparkleVertex`; only the
     /// remaining slots draw burst particles.
-    /// Alpha is quantised into eight bins drawn at their mid value (error ≤ ±1/16 around `sin(πt)·rate`), so the
-    /// whole field costs at most eight fills. Sparkles blend additively (`.plusLighter`: premultiplied
-    /// `colour·α` is added to the destination), matching §3.8 and the Metal sparkle pipeline (source/destination
-    /// RGB factors `.one`), through a clipped context copy — no offscreen layer. The star's waist (inner radius
-    /// 0.36) is wider than the Metal star's, which stands in for the Metal fragment's soft core glow: along the
-    /// diagonals the Canvas edge sits at 0.36·size, the Metal star+core half-coverage contour at ≈ 0.3·size.
+    /// Alpha `sin(πt)·rate` is quantised by its life pulse `sin(πt)` into eight bins drawn at their mid value times
+    /// the rate (error ≤ ±rate/16, i.e. eight opacity levels across whatever range the rate gives), with separate bins
+    /// for the ambient field and the burst, so the field costs at most eight fills (sixteen while a burst plays).
+    /// Sparkles blend additively (`.plusLighter`: premultiplied `colour·α` is added to the destination), matching §3.8
+    /// and the Metal sparkle pipeline (source/destination RGB factors `.one`), through a clipped context copy — no
+    /// offscreen layer. The sprite is the same polygon in both renderers: four tips at `size` on the axes and a waist
+    /// of 0.36·size on the diagonals (`CharacterPaths.addStar4` here, the exact-distance `sdSparkleStar` in the
+    /// Metal fragment), with no soft core.
     func drawSparkles(in ctx: inout GraphicsContext, clip: Path?) {
         let rate = min(max(pose.effects.sparkleRate, 0), 1)
         let burst = min(max(pose.effects.sparkleBurst, 0), 1)
@@ -115,15 +117,11 @@ extension CanvasScene {
         let boost = features.contains(.dome) && accessory.isFinite ? Int((min(max(accessory, 0), 1) * 20).rounded()) : 0
         guard rate > 0.01 || burst > 0.01 else { return }
 
-        var bins = SparkleBins()
+        var ambientBins = SparkleBins()
+        var burstBins = SparkleBins()
         let t = pose.time
 
         func fract(_ x: Float) -> Float { x - x.rounded(.down) }
-
-        func emit(_ x: Float, _ y: Float, _ size: Float, _ alpha: Float) {
-            guard alpha > 0.04, size > 0.002 else { return }
-            bins.add(alpha: alpha, center: CGPoint(x: CGFloat(x), y: CGFloat(y)), radius: CGFloat(size))
-        }
 
         if rate > 0.01 {
             for i in 0..<(40 + boost) {
@@ -139,7 +137,7 @@ extension CanvasScene {
                 let y = sin(ang) * rad * 0.6 + (life - 0.5) * 0.6
                 let pulse = sin(Float.pi * life)
                 let size = 0.05 * (0.6 + fract(seed * 5.5)) * pulse
-                emit(x, y, size, pulse * rate)
+                ambientBins.emit(x: x, y: y, size: size, pulse: pulse, rate: rate)
             }
         }
         if burst > 0.01 {
@@ -156,7 +154,7 @@ extension CanvasScene {
                 let y = sin(ang) * rad * 0.6 + (life - 0.5) * 0.6
                 let pulse = sin(Float.pi * life)
                 let size = 0.05 * (0.6 + fract(seed * 5.5)) * pulse
-                emit(x, y, size, pulse * burst)
+                burstBins.emit(x: x, y: y, size: size, pulse: pulse, rate: burst)
             }
         }
 
@@ -165,21 +163,36 @@ extension CanvasScene {
             c.clip(to: clip)
         }
         c.blendMode = .plusLighter
+        fillSparkles(ambientBins, rate: rate, in: &c)
+        fillSparkles(burstBins, rate: burst, in: &c)
+    }
+
+    /// Fills each non-empty bin at `SparkleBins.opacity(k) · rate` (a no-op for an empty bin set).
+    private func fillSparkles(_ bins: SparkleBins, rate: Float, in ctx: inout GraphicsContext) {
         let m = base.matrix
         let color = res.sparkle
+        let scale = Double(rate)
         for k in 0..<SparkleBins.count {
             let path = bins.path(k)
             guard !path.isEmpty else { continue }
-            c.opacity = SparkleBins.opacity(k)
-            c.fill(path.applying(m), with: .color(color))
+            ctx.opacity = SparkleBins.opacity(k) * scale
+            ctx.fill(path.applying(m), with: .color(color))
         }
     }
 }
 
-/// Eight alpha bins for the sparkle field (unit-space star paths). A sparkle of alpha `a` goes into bin
+/// Eight bins for the sparkle field (unit-space star paths), indexed by a normalised level in 0...1 — the sparkle's
+/// life pulse `sin(πt)`, so the drawn alpha is that level times the rate. A level `a` goes into bin
 /// `min(7, Int(a·8))`, which is filled at the bin's mid value `(k + 0.5)/8`.
 struct SparkleBins {
     static let count = 8
+
+    /// Adds a sparkle of life pulse `pulse` (0...1) to the bin set of a field emitted at `rate`; sparkles whose drawn
+    /// alpha `pulse·rate` is below 0.04, or that are tiny, are skipped.
+    mutating func emit(x: Float, y: Float, size: Float, pulse: Float, rate: Float) {
+        guard pulse * rate > 0.04, size > 0.002 else { return }
+        add(alpha: pulse, center: CGPoint(x: CGFloat(x), y: CGFloat(y)), radius: CGFloat(size))
+    }
 
     private var bin0 = Path()
     private var bin1 = Path()

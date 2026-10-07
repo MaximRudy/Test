@@ -524,6 +524,53 @@ final class LipSyncTests: XCTestCase {
         XCTAssertEqual(SpeechSynthesisDriver.bcp47(for: "en_GB"), "en-GB")
     }
 
+    func testSpeechAudioSessionIsSharedAndReferenceCounted() {
+        // Bookkeeping only: the platform AVAudioSession is not touched.
+        let saved = SpeechAudioSession.controlsPlatformSession
+        SpeechAudioSession.controlsPlatformSession = false
+        defer { SpeechAudioSession.controlsPlatformSession = saved }
+        let baseline = SpeechAudioSession.userCount
+
+        // Two drivers speak: one activation, kept while either of them still holds the session.
+        SpeechAudioSession.acquire()
+        SpeechAudioSession.acquire()
+        XCTAssertEqual(SpeechAudioSession.userCount, baseline + 2)
+        XCTAssertTrue(SpeechAudioSession.isActive)
+        SpeechAudioSession.release()
+        XCTAssertEqual(SpeechAudioSession.userCount, baseline + 1)
+        XCTAssertTrue(SpeechAudioSession.isActive)
+        XCTAssertFalse(SpeechAudioSession.isDeactivationPending, "another driver is still speaking")
+
+        // The last holder lets go: deactivation is deferred, and the next speaker cancels it.
+        SpeechAudioSession.release()
+        XCTAssertEqual(SpeechAudioSession.userCount, baseline)
+        if baseline == 0 {
+            XCTAssertTrue(SpeechAudioSession.isDeactivationPending)
+        }
+        SpeechAudioSession.acquire()
+        XCTAssertFalse(SpeechAudioSession.isDeactivationPending)
+        XCTAssertTrue(SpeechAudioSession.isActive)
+        SpeechAudioSession.release()
+        XCTAssertEqual(SpeechAudioSession.userCount, baseline)
+
+        // Unbalanced releases never underflow.
+        if baseline == 0 {
+            SpeechAudioSession.release()
+            XCTAssertEqual(SpeechAudioSession.userCount, 0)
+        }
+    }
+
+    func testIdleSpeechDriverHoldsNoAudioSession() {
+        let baseline = SpeechAudioSession.userCount
+        let driver = SpeechSynthesisDriver()
+        driver.stop()
+        driver.resume()
+        driver.pause()
+        XCTAssertFalse(driver.isSpeaking)
+        XCTAssertEqual(SpeechAudioSession.userCount, baseline, "stop() without an utterance must not release someone else's hold")
+        XCTAssertEqual(driver.sample(at: 1.0), .silent)
+    }
+
     // MARK: Estimator details
 
     func testRussianStressMarksAreIgnored() {

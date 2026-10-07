@@ -59,7 +59,9 @@ struct ShowcaseView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
+            // The renderers freeze as soon as the scene is no longer active (Control Center, app switcher,
+            // system alerts), so speech stops too: the voice never runs on with a frozen mouth.
+            if phase != .active {
                 rig?.stopSpeaking()
             }
         }
@@ -238,7 +240,7 @@ struct StageHeader: View {
                     .accessibilityHidden(true)
             }
             Spacer(minLength: 8)
-            FPSBadge(isPaused: isPaused, rendererName: rendererName)
+            FPSBadge(rig: rig, isPaused: isPaused, rendererName: rendererName)
         }
     }
 }

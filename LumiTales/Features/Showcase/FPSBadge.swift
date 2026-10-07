@@ -1,12 +1,16 @@
 import SwiftUI
+import StoryCharacters
 
 /// Frames-per-second badge labelled with the active renderer.
 ///
-/// Frames are counted in an invisible `TimelineView(.animation)` behind the badge, so the per-frame work is
-/// one `Color.clear` evaluation. The visible glass label is re-rendered only when the half-second average
-/// changes (at most twice a second). The figure is the SwiftUI display rate: it matches what the Canvas
-/// renderer can achieve, while the Metal renderer draws on its own `MTKView` loop.
+/// The figure is the rate at which the stage renderer (Metal or Canvas) actually produced poses: both
+/// renderers call `rig.pose(at:)` exactly once per drawn frame, which stamps `rig.currentPose.time`. An
+/// invisible `TimelineView` behind the badge, capped at 60 Hz like the renderers, samples that stamp and
+/// counts how many distinct values appear per half-second window, so GPU stalls and dropped frames show up.
+/// `currentPose` is `@ObservationIgnored`, so sampling it never invalidates SwiftUI; the per-tick work is one
+/// `Color.clear` evaluation, and the visible glass label is re-rendered at most twice a second.
 struct FPSBadge: View {
+    let rig: CharacterRig
     var isPaused: Bool
     var rendererName: String
 
@@ -33,9 +37,10 @@ struct FPSBadge: View {
         .padding(.vertical, 6)
         .glassEffect()
         .background {
-            TimelineView(.animation(paused: isPaused)) { timeline in
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: isPaused)) { timeline in
                 Color.clear
-                    .onChange(of: counter.tick(timeline.date.timeIntervalSinceReferenceDate)) { _, measured in
+                    .onChange(of: counter.tick(timeline.date.timeIntervalSinceReferenceDate,
+                                               renderTime: rig.currentPose.time)) { _, measured in
                         fps = measured
                     }
             }
@@ -49,20 +54,25 @@ struct FPSBadge: View {
 }
 
 /// Plain reference type (deliberately not `@Observable`) so per-frame ticks never invalidate SwiftUI.
-/// `tick` returns the latest half-second average; it changes at most twice a second.
+/// `tick` returns the latest half-second average of rendered frames; it changes at most twice a second.
 final class FrameCounter {
     private var frames = 0
     private var windowStart: TimeInterval = 0
     private var lastTick: TimeInterval = -1
+    private var lastRenderTime: Float = -1
     private var fps = 0
 
-    /// Registers one frame at `now` and returns the most recent half-second average.
-    /// A repeated timestamp (the timeline content re-evaluated without a new frame) is not counted.
-    func tick(_ now: TimeInterval) -> Int {
+    /// Registers one sampling tick at `now` and returns the most recent half-second average.
+    /// `renderTime` is the renderer's latest pose timestamp; a frame is counted only when it has changed
+    /// since the previous tick. A repeated `now` (the timeline content re-evaluated without a new tick)
+    /// is ignored.
+    func tick(_ now: TimeInterval, renderTime: Float) -> Int {
         if now == lastTick {
             return fps
         }
         lastTick = now
+        let rendered = renderTime != lastRenderTime
+        lastRenderTime = renderTime
         if windowStart == 0 {
             windowStart = now
         }
@@ -73,7 +83,9 @@ final class FrameCounter {
             frames = 0
             return fps
         }
-        frames += 1
+        if rendered {
+            frames += 1
+        }
         if elapsed >= 0.5 {
             fps = Int((Double(frames) / elapsed).rounded())
             frames = 0
