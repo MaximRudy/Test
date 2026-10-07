@@ -91,3 +91,7 @@ iOSInjectionProject/
 
 # System Files
 .DS_Store
+# Swift Package Manager / Xcode 15+
+.swiftpm/
+*.xcuserdatad/
+Package.resolved
